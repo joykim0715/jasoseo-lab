@@ -1,0 +1,132 @@
+{
+  "name": "김인홍",
+  "tagline": "스포츠과학 × 디지털헬스 | 실무 경력 1년",
+  "bio": "헬스케어·디지털 헬스 분야에서 스포츠과학적 전문성과 데이터 분석으로 솔루션을 탐색합니다.",
+  "about": "헬스케어 실무 경력 1년의 김인홍입니다. 스포츠과학 전문성과 데이터 문해력을 바탕으로 차세대 헬스케어 시장을 만들어 나가겠습니다.",
+  "portfolioUrl": "https://kiminhong-portfolio.vercel.app",
+  "education": [
+    {
+      "school": "성균관대학교",
+      "period": "2020 ~ 2025.08 (졸업)",
+      "major": "스포츠과학부 원전공 + 국제통상학과 복수전공"
+    }
+  ],
+  "skills": [
+    {
+      "category": "OA",
+      "tools": "MS Word, Excel, PowerPoint",
+      "details": ["데이터 관리 및 시각화", "페이퍼워크 작업", "기타 자료 제작"]
+    },
+    {
+      "category": "Data Analysis",
+      "tools": "SPSS, MySQL",
+      "details": ["가설 검정과 회귀 분석 등 다각도 통계 검정", "효율적인 데이터 추출 쿼리 작성 및 관리"]
+    },
+    {
+      "category": "Visualization",
+      "tools": "Figma, Looker Studio",
+      "details": ["UX 중심 레이아웃 설계", "컴포넌트 기반 UI 프로토타이핑"]
+    },
+    {
+      "category": "Generative AI",
+      "tools": "Claude, Cursor, Gemini",
+      "details": ["MCP 기반 업무 자동화", "비주얼 에셋 생성", "바이브코딩"]
+    }
+  ],
+  "experiences": [
+    {
+      "id": "homecare-researcher",
+      "organization": "가천대학교 메디컬캠퍼스 산학협력단",
+      "role": "시니어 헬스케어 국책과제 연구원",
+      "period": "2025.03 ~ 2026.02",
+      "employmentType": "계약직",
+      "highlights": [
+        "SQL로 6.9만 건 로그 데이터 추출 및 SPSS 기반 전처리로 분석 유효성 85% 확보",
+        "웨어러블 blackout·결측 구간을 식별하고 현장 밀착 관리로 분석 가능한 데이터 연속성 유지",
+        "생체 데이터를 생활 습관과 연결한 맞춤형 건강 가이드 기획, 유저 리텐션 83% 달성",
+        "활성 사용자·이탈 위험군 등 핵심 지표 중심 Figma 인터랙티브 대시보드 설계로 MOU·계약 5건 지원"
+      ],
+      "tags": ["헬스케어", "데이터", "생성형AI", "대시보드"]
+    },
+    {
+      "id": "taekwondo-assistant",
+      "organization": "신성태권도 미금점",
+      "role": "보조사범",
+      "period": "2023.04 ~ 2023.12",
+      "employmentType": "아르바이트",
+      "highlights": [],
+      "tags": ["현장", "지도"]
+    },
+    {
+      "id": "fitness-cs",
+      "organization": "mvm휘트니스 성복점",
+      "role": "CS매니저",
+      "period": "2021.02 ~ 2022.08",
+      "employmentType": "아르바이트",
+      "highlights": [],
+      "tags": ["CS", "고객응대"]
+    }
+  ],
+  "works": [
+    {
+      "id": "01",
+      "title": "시니어 헬스케어 국책사업 데이터 수집 및 관리",
+      "category": "Digital Health",
+      "description": "시니어 헬스케어 국책과제에서 건강 로그 데이터를 관리·분석하고, 사용자 인사이트 기반 맞춤형 건강 가이드와 의사결정용 대시보드로 분석 유효성 85%, 리텐션 83%, MOU·계약 5건을 지원했습니다.",
+      "role": "시니어 헬스케어 국책과제 연구원",
+      "metrics": ["6.9만 건 데이터", "분석 유효성 85%", "리텐션 83%", "MOU·계약 5건"],
+      "tags": ["헬스케어", "데이터", "SQL", "SPSS", "생성형AI"]
+    },
+    {
+      "id": "02",
+      "title": "삼성생명 산학협력 프로젝트 '라이프놀로지 랩 1기'",
+      "category": "Digital Health",
+      "description": "fNIRS 센서 기반 웨어러블 링과 앱 서비스 'de:light'를 기획하고, UX 플로우와 프로토타입을 설계한 산학 협력 프로젝트입니다.",
+      "role": "팀원 / 기획·UX",
+      "metrics": ["앱 프로토타입", "fNIRS 웨어러블"],
+      "tags": ["UX", "Figma", "웨어러블", "헬스케어"]
+    },
+    {
+      "id": "03",
+      "title": "총학생회 인권복지국원 활동",
+      "category": "Teamwork",
+      "description": "총학생회 소속으로 학생 설문 데이터를 수집·분석하여 도서관 리모델링 방향을 도출하고, 배리어프리맵 설계 의견을 조율한 프로젝트입니다.",
+      "role": "인권복지국원",
+      "metrics": ["설문 800명", "목표 만족도 87%"],
+      "tags": ["설문", "데이터", "협업", "조율"]
+    },
+    {
+      "id": "04",
+      "title": "스포츠과학대학 학생회-학과 맞춤형 기업 제휴 사업",
+      "category": "Teamwork",
+      "description": "재학생 니즈 분석을 바탕으로 학과 맞춤형 기업 제휴를 기획·추진한 프로젝트입니다.",
+      "role": "대외협력국 차장",
+      "metrics": ["설문 200명", "제휴 물량 +30%"],
+      "tags": ["기획", "협상", "니즈조사"]
+    },
+    {
+      "id": "05",
+      "title": "대한체육회 국대스마터즈 1기",
+      "category": "Sports Marketing",
+      "description": "스포츠 종목 홍보 콘텐츠를 기획·제작하고, 디지털 채널 기반 마케팅 전략을 수행한 프로젝트입니다.",
+      "role": "대외활동 팀원",
+      "metrics": ["수영 종목 홍보", "8개월"],
+      "tags": ["마케팅", "콘텐츠", "스포츠"]
+    }
+  ],
+  "certifications": [
+    { "name": "ADsP", "fullName": "데이터 분석 준전문가", "issuer": "한국데이터산업진흥원", "date": "2026.06.05", "description": "R Studio와 SQL을 활용한 데이터 필터링·분석 역량 보유" },
+    { "name": "AI-POT 2급", "fullName": "AI 프롬프트 활용능력", "issuer": "KPC", "date": "2026.04.30", "description": "역설계 프롬프팅 및 커넥터·MCP 기반 업무 자동화 역량" },
+    { "name": "AIBT 2급", "fullName": "AI 비즈니스 활용", "issuer": "KPC", "date": "2026.04.02", "description": "AI 기술의 비즈니스 적용 원리 이해 및 실무 자동화 역량" },
+    { "name": "Google Analytics Certification", "fullName": "구글 애널리틱스 인증", "issuer": "Google", "date": "2026.02.03", "description": "이벤트 기반 사용자 행동 패턴 및 유입 경로 분석 역량" },
+    { "name": "TOEIC", "fullName": "850점", "issuer": "ETS", "date": "2025.01.26", "description": "영어 독해·업무 문서 이해 역량" },
+    { "name": "OPIc", "fullName": "Intermediate High", "issuer": "ACTFL", "date": "2025.08.03", "description": "영어 말하기 의사소통 역량" },
+    { "name": "스마트홈 헬스케어 지도사 2급", "fullName": "스마트홈 헬스케어 지도사", "issuer": "KSHA", "date": "2025.11.14", "description": "스마트홈 기술과 보건 의료 서비스 결합, 시니어 맞춤 기획 역량" }
+  ],
+  "values": [
+    "근거 기반(Evidence-based) 의사결정",
+    "사용자 중심의 디지털 헬스 경험",
+    "데이터로 읽는 움직임과 회복",
+    "연구와 현장을 잇는 실용적 솔루션"
+  ]
+}
