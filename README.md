@@ -2,8 +2,9 @@
 
 취업 공고를 분석하고 포트폴리오·Notion 경험에 맞춘 자기소개서 초안을 만드는 웹앱입니다.
 
-**라이브:** 배포 후 Vercel URL  
+**라이브:** https://jasoseo-lab.vercel.app  
 **포트폴리오:** https://kiminhong-portfolio.vercel.app
+**GitHub:** https://github.com/joykim0715/jasoseo-lab
 
 ## 로컬 실행
 
