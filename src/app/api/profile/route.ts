@@ -15,9 +15,9 @@ export async function GET() {
     essayCount: profile.essayArchive.length,
     workCount: profile.works.length,
     notionConnected,
+    groqConfigured: llm.groqConfigured,
     openaiConfigured: llm.openaiConfigured,
     geminiConfigured: llm.geminiConfigured,
-    /** @deprecated Claude 제거 — 하위 호환 */
     anthropicConfigured: false,
     llmPrimary: llm.primary,
     llmFallback: llm.fallback,

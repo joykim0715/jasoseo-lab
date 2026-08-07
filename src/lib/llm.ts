@@ -5,46 +5,58 @@ import {
   type ResponseSchema,
 } from "@google/generative-ai";
 
+/** 무료 메인: Groq (OpenAI 호환 API) */
+const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+/** 유료 옵션(선택): OpenAI */
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
-/** 환경변수 우선, 없으면 최신 → 안정 순으로 폴백 */
 const GEMINI_MODEL_CANDIDATES = [
   process.env.GEMINI_MODEL,
   "gemini-3.5-flash",
   "gemini-2.5-flash",
   "gemini-2.0-flash",
-  "gemini-flash-latest",
 ].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
 
 let resolvedGeminiModel: string | null = null;
 
+let groq: OpenAI | null = null;
 let openai: OpenAI | null = null;
 let gemini: GoogleGenerativeAI | null = null;
 
-/** OpenAI 결제/쿼터 이슈 시 이후 GPT 호출 스킵 */
+let groqQuotaExhausted = false;
 let openaiBillingExhausted = false;
-/** Gemini 429/쿼터 초과 시 이후 Gemini 호출 스킵 (한도 추가 소모 방지) */
 let geminiQuotaExhausted = false;
 
 export function llmStatus() {
+  const primary = getPrimaryChat()?.name ?? (getGemini() ? "gemini" : "none");
   return {
+    groqConfigured: Boolean(process.env.GROQ_API_KEY) && !groqQuotaExhausted,
     openaiConfigured:
       Boolean(process.env.OPENAI_API_KEY) && !openaiBillingExhausted,
     geminiConfigured:
       Boolean(process.env.GEMINI_API_KEY) && !geminiQuotaExhausted,
-    /** @deprecated Claude 제거 — 하위 호환용 */
     claudeConfigured: false,
-    primary: openaiBillingExhausted
-      ? ("gemini" as const)
-      : process.env.OPENAI_API_KEY
-        ? ("openai" as const)
-        : ("gemini" as const),
+    primary,
     fallback: "gemini" as const,
   };
 }
 
 export { SchemaType };
 export type { ResponseSchema };
+
+type ChatProvider = "groq" | "openai";
+
+function getGroq() {
+  if (groqQuotaExhausted) return null;
+  if (!process.env.GROQ_API_KEY) return null;
+  if (!groq) {
+    groq = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    });
+  }
+  return groq;
+}
 
 function getOpenAI() {
   if (openaiBillingExhausted) return null;
@@ -64,37 +76,54 @@ function getGemini() {
   return gemini;
 }
 
-function assertAnyProvider() {
-  if (getOpenAI() || getGemini()) return;
+/** 무료 Groq 우선 → (선택) OpenAI → Gemini 폴백 */
+function getPrimaryChat(): {
+  client: OpenAI;
+  model: string;
+  name: ChatProvider;
+} | null {
+  const g = getGroq();
+  if (g) return { client: g, model: GROQ_MODEL, name: "groq" };
+  const o = getOpenAI();
+  if (o) return { client: o, model: OPENAI_MODEL, name: "openai" };
+  return null;
+}
 
-  if (openaiBillingExhausted && geminiQuotaExhausted) {
+function assertAnyProvider() {
+  if (getPrimaryChat() || getGemini()) return;
+
+  if (groqQuotaExhausted && geminiQuotaExhausted) {
     throw new Error(
-      "OpenAI 결제 잔액이 부족하고 Gemini 요청 한도도 초과되었습니다. platform.openai.com 에서 OpenAI 크레딧을 충전한 뒤 다시 시도해 주세요.",
+      "Groq·Gemini 모두 요청 한도를 초과했습니다. 잠시 후 다시 시도하거나 console.groq.com 에서 새 키/한도를 확인해 주세요.",
     );
   }
-  if (openaiBillingExhausted) {
+  if (geminiQuotaExhausted && !process.env.GROQ_API_KEY) {
     throw new Error(
-      "OpenAI 결제 잔액/크레딧이 부족합니다. API 키만으로는 호출되지 않습니다. platform.openai.com/settings/organization/billing 에서 충전하세요.",
-    );
-  }
-  if (geminiQuotaExhausted) {
-    throw new Error(
-      "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 OpenAI 크레딧을 충전하세요.",
+      "Gemini 요청 한도(429) 초과. 무료로 쓰려면 Groq API 키(GROQ_API_KEY)를 추가하세요: console.groq.com",
     );
   }
   throw new Error(
-    "OPENAI_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다.",
+    "GROQ_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다. (권장: 둘 다 — 무료)",
   );
+}
+
+function markGroqQuotaIfNeeded(err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/429|rate_limit|too many requests|quota/i.test(msg)) {
+    groqQuotaExhausted = true;
+    console.warn("[llm] Groq rate limited — skipping Groq for this process");
+  }
 }
 
 function markOpenAIBillingIfNeeded(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
-  // rate_limit 은 일시적이므로 영구 스킵하지 않음
-  if (/insufficient_quota|billing_not_active|credit|payment|exceeded your current quota/i.test(msg)) {
+  if (
+    /insufficient_quota|billing_not_active|credit|payment|exceeded your current quota/i.test(
+      msg,
+    )
+  ) {
     openaiBillingExhausted = true;
-    console.warn(
-      "[llm] OpenAI billing/quota exhausted — skipping OpenAI for this process",
-    );
+    console.warn("[llm] OpenAI billing exhausted — skipping OpenAI");
   }
 }
 
@@ -108,13 +137,10 @@ function isGeminiQuotaError(err: unknown): boolean {
 function markGeminiQuotaIfNeeded(err: unknown) {
   if (isGeminiQuotaError(err)) {
     geminiQuotaExhausted = true;
-    console.warn(
-      "[llm] Gemini quota/rate limited — skipping Gemini for this process",
-    );
+    console.warn("[llm] Gemini quota/rate limited — skipping Gemini");
   }
 }
 
-/** LLM 응답에서 첫 번째 완전한 JSON 값만 추출 */
 function extractJsonPayload(text: string): string {
   let cleaned = text.trim();
   cleaned = cleaned
@@ -128,7 +154,6 @@ function extractJsonPayload(text: string): string {
   if (objStart === -1) start = arrStart;
   else if (arrStart === -1) start = objStart;
   else start = Math.min(objStart, arrStart);
-
   if (start === -1) return cleaned;
 
   let depth = 0;
@@ -155,27 +180,7 @@ function extractJsonPayload(text: string): string {
       if (depth === 0) return cleaned.slice(start, i + 1);
     }
   }
-
   return cleaned.slice(start);
-}
-
-function salvageJsonPayload(raw: string): string[] {
-  const base = extractJsonPayload(raw);
-  const variants = new Set<string>([base]);
-
-  variants.add(
-    base.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'"),
-  );
-
-  for (const v of [...variants]) {
-    variants.add(v.replace(/,\s*([}\]])/g, "$1"));
-  }
-
-  for (const v of [...variants]) {
-    variants.add(closeOpenStructures(v));
-  }
-
-  return [...variants];
 }
 
 function closeOpenStructures(input: string): string {
@@ -224,6 +229,21 @@ function closeOpenStructures(input: string): string {
   return s.replace(/,\s*([}\]])/g, "$1");
 }
 
+function salvageJsonPayload(raw: string): string[] {
+  const base = extractJsonPayload(raw);
+  const variants = new Set<string>([base]);
+  variants.add(
+    base.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'"),
+  );
+  for (const v of [...variants]) {
+    variants.add(v.replace(/,\s*([}\]])/g, "$1"));
+  }
+  for (const v of [...variants]) {
+    variants.add(closeOpenStructures(v));
+  }
+  return [...variants];
+}
+
 function parseLlmJson<T>(text: string): T {
   const attempts = salvageJsonPayload(text);
   let lastErr: Error | null = null;
@@ -239,20 +259,19 @@ function parseLlmJson<T>(text: string): T {
 
 async function withProviderFallback<T>(
   label: string,
-  runOpenAI: () => Promise<T>,
+  runPrimary: () => Promise<T>,
   runGemini: () => Promise<T>,
 ): Promise<T> {
   assertAnyProvider();
-  const hasOpenAI = Boolean(getOpenAI());
+  const hasPrimary = Boolean(getPrimaryChat());
   const hasGemini = Boolean(getGemini());
 
-  if (hasOpenAI) {
+  if (hasPrimary) {
     try {
-      return await runOpenAI();
+      return await runPrimary();
     } catch (err) {
-      markOpenAIBillingIfNeeded(err);
       if (hasGemini) {
-        console.warn(`[llm] OpenAI ${label} failed → Gemini fallback:`, err);
+        console.warn(`[llm] Primary ${label} failed → Gemini:`, err);
         try {
           return await runGemini();
         } catch (geminiErr) {
@@ -270,31 +289,27 @@ async function withProviderFallback<T>(
   }
 }
 
-function formatProviderError(openaiErr?: unknown, geminiErr?: unknown): string {
+function formatProviderError(primaryErr?: unknown, geminiErr?: unknown): string {
   const parts: string[] = [];
-  const openaiMsg = openaiErr instanceof Error ? openaiErr.message : "";
+  const primaryMsg = primaryErr instanceof Error ? primaryErr.message : "";
   const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "";
 
-  if (/insufficient_quota|billing|credit|payment|exceeded your current quota/i.test(openaiMsg)) {
+  if (/429|rate_limit|too many requests/i.test(primaryMsg)) {
+    parts.push("Groq/메인 LLM 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.");
+  } else if (/insufficient_quota|billing|credit|payment/i.test(primaryMsg)) {
     parts.push(
-      "OpenAI 크레딧/결제 잔액이 부족합니다. API 키만으로는 부족하니 platform.openai.com 결제(Billing)에서 충전하세요.",
+      "유료 LLM 잔액이 부족합니다. 무료로 쓰려면 GROQ_API_KEY를 설정하세요.",
     );
-  } else if (/incorrect api key|invalid_api_key|401/i.test(openaiMsg)) {
-    parts.push("OpenAI API 키가 유효하지 않습니다.");
-  } else if (openaiMsg) {
-    parts.push(`OpenAI: ${openaiMsg.slice(0, 180)}`);
+  } else if (primaryMsg) {
+    parts.push(`메인 LLM: ${primaryMsg.slice(0, 180)}`);
   }
 
-  if (/API_KEY|api key|403|401|invalid.*key/i.test(geminiMsg)) {
+  if (/429|Too Many Requests|RESOURCE_EXHAUSTED|exceeded your/i.test(geminiMsg)) {
+    parts.push(
+      "Gemini 무료 한도(429) 초과. 잠시 기다리거나 Groq 키를 추가하세요 (console.groq.com).",
+    );
+  } else if (/API_KEY|api key|401|403/i.test(geminiMsg)) {
     parts.push("Gemini API 키가 유효하지 않습니다.");
-  } else if (/429|Too Many Requests|RESOURCE_EXHAUSTED|exceeded your/i.test(geminiMsg)) {
-    parts.push(
-      "Gemini 무료/요청 한도(429)를 초과했습니다. 잠시 기다리거나 OpenAI 크레딧을 충전하세요.",
-    );
-  } else if (/no longer available|not found|404|not supported/i.test(geminiMsg)) {
-    parts.push(
-      `Gemini 모델을 사용할 수 없습니다 (시도: ${GEMINI_MODEL_CANDIDATES.join(", ")}).`,
-    );
   } else if (geminiMsg) {
     parts.push(`Gemini: ${geminiMsg.slice(0, 180)}`);
   }
@@ -302,17 +317,17 @@ function formatProviderError(openaiErr?: unknown, geminiErr?: unknown): string {
   return parts.join(" / ") || "LLM 호출에 실패했습니다.";
 }
 
-async function runOpenAIText(params: {
+async function runPrimaryText(params: {
   system: string;
   user: string;
   maxTokens?: number;
   jsonMode?: boolean;
 }): Promise<string> {
-  const client = getOpenAI();
-  if (!client) throw new Error("OPENAI_API_KEY 없음");
+  const primary = getPrimaryChat();
+  if (!primary) throw new Error("GROQ_API_KEY 또는 OPENAI_API_KEY 없음");
   try {
-    const res = await client.chat.completions.create({
-      model: OPENAI_MODEL,
+    const res = await primary.client.chat.completions.create({
+      model: primary.model,
       max_tokens: params.maxTokens ?? 4096,
       ...(params.jsonMode
         ? { response_format: { type: "json_object" as const } }
@@ -324,7 +339,8 @@ async function runOpenAIText(params: {
     });
     return res.choices[0]?.message?.content?.trim() ?? "";
   } catch (err) {
-    markOpenAIBillingIfNeeded(err);
+    if (primary.name === "groq") markGroqQuotaIfNeeded(err);
+    else markOpenAIBillingIfNeeded(err);
     throw err;
   }
 }
@@ -379,7 +395,7 @@ async function runGeminiText(params: {
       if (isGeminiQuotaError(err)) {
         markGeminiQuotaIfNeeded(err);
         throw new Error(
-          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 OpenAI 크레딧을 충전하세요.",
+          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 Groq API 키를 추가하세요.",
         );
       }
       if (isGeminiModelMissingError(err)) {
@@ -402,7 +418,7 @@ export async function llmText(params: {
 }): Promise<string> {
   return withProviderFallback(
     "text",
-    () => runOpenAIText(params),
+    () => runPrimaryText(params),
     () => runGeminiText(params),
   );
 }
@@ -425,29 +441,27 @@ async function repairJsonText(
           jsonMode: true,
           responseSchema,
         })
-      : runOpenAIText({
+      : runPrimaryText({
           system,
           user,
           maxTokens: maxTokens ?? 4096,
           jsonMode: true,
         });
 
-  const tryGeminiFirst =
-    preferGemini || openaiBillingExhausted || !getOpenAI();
+  const tryGeminiFirst = preferGemini || !getPrimaryChat();
 
   if (tryGeminiFirst && getGemini()) {
     try {
       return await run(true);
     } catch {
-      if (getOpenAI()) return run(false);
+      if (getPrimaryChat()) return run(false);
       throw new Error("JSON 복구 실패");
     }
   }
-  if (getOpenAI()) {
+  if (getPrimaryChat()) {
     try {
       return await run(false);
-    } catch (err) {
-      markOpenAIBillingIfNeeded(err);
+    } catch {
       if (getGemini()) return run(true);
       throw new Error("JSON 복구 실패");
     }
@@ -471,7 +485,7 @@ async function completeJson<T>(params: {
         jsonMode: true,
         responseSchema: params.responseSchema,
       })
-    : await runOpenAIText({
+    : await runPrimaryText({
         system,
         user: params.user,
         maxTokens: params.maxTokens,
@@ -485,7 +499,7 @@ async function completeJson<T>(params: {
     const repaired = await repairJsonText(
       text,
       params.maxTokens,
-      params.useGemini || openaiBillingExhausted,
+      params.useGemini || !getPrimaryChat(),
       params.responseSchema,
     );
     return parseLlmJson<T>(repaired);
@@ -496,7 +510,6 @@ export async function llmJson<T>(params: {
   system: string;
   user: string;
   maxTokens?: number;
-  /** Gemini structured output schema (권장) */
   responseSchema?: ResponseSchema;
 }): Promise<T> {
   return withProviderFallback(
@@ -521,42 +534,6 @@ export async function llmJson<T>(params: {
 }
 
 type MediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
-
-async function runOpenAIVision(params: {
-  system: string;
-  user: string;
-  mediaType: MediaType;
-  base64: string;
-  maxTokens?: number;
-}): Promise<string> {
-  const client = getOpenAI();
-  if (!client) throw new Error("OPENAI_API_KEY 없음");
-  try {
-    const res = await client.chat.completions.create({
-      model: OPENAI_MODEL,
-      max_tokens: params.maxTokens ?? 4096,
-      messages: [
-        { role: "system", content: params.system },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: params.user },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${params.mediaType};base64,${params.base64}`,
-              },
-            },
-          ],
-        },
-      ],
-    });
-    return res.choices[0]?.message?.content?.trim() ?? "";
-  } catch (err) {
-    markOpenAIBillingIfNeeded(err);
-    throw err;
-  }
-}
 
 async function runGeminiVision(params: {
   system: string;
@@ -601,7 +578,7 @@ async function runGeminiVision(params: {
       if (isGeminiQuotaError(err)) {
         markGeminiQuotaIfNeeded(err);
         throw new Error(
-          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 OpenAI 크레딧을 충전하세요.",
+          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하세요.",
         );
       }
       if (isGeminiModelMissingError(err)) {
@@ -617,6 +594,7 @@ async function runGeminiVision(params: {
     : new Error("사용 가능한 Gemini 모델이 없습니다.");
 }
 
+/** 이미지 OCR은 Gemini 무료 Vision 우선 (Groq는 텍스트 위주) */
 export async function llmVisionText(params: {
   system: string;
   user: string;
@@ -624,9 +602,15 @@ export async function llmVisionText(params: {
   base64: string;
   maxTokens?: number;
 }): Promise<string> {
-  return withProviderFallback(
-    "vision",
-    () => runOpenAIVision(params),
-    () => runGeminiVision(params),
+  if (getGemini()) {
+    try {
+      return await runGeminiVision(params);
+    } catch (err) {
+      markGeminiQuotaIfNeeded(err);
+      throw new Error(formatProviderError(undefined, err));
+    }
+  }
+  throw new Error(
+    "이미지 분석에는 GEMINI_API_KEY가 필요합니다. (무료 AI Studio 키)",
   );
 }
