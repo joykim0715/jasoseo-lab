@@ -1,9 +1,25 @@
 import mammoth from "mammoth";
-import { PDFParse } from "pdf-parse";
 import { structureJobPosting } from "./structureJd";
 import type { JobPosting } from "../types";
 
 const MAX_BYTES = 12 * 1024 * 1024;
+
+function polyfillPdfDom() {
+  const g = globalThis as Record<string, unknown>;
+  if (typeof g.DOMMatrix === "undefined") {
+    g.DOMMatrix = class {};
+  }
+  if (typeof g.ImageData === "undefined") {
+    g.ImageData = class {
+      data = new Uint8ClampedArray(4);
+      width = 1;
+      height = 1;
+    };
+  }
+  if (typeof g.Path2D === "undefined") {
+    g.Path2D = class {};
+  }
+}
 
 export async function ingestFromFile(params: {
   buffer: Buffer;
@@ -20,6 +36,8 @@ export async function ingestFromFile(params: {
   let text = "";
 
   if (mime.includes("pdf") || name.endsWith(".pdf")) {
+    polyfillPdfDom();
+    const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: params.buffer });
     try {
       const result = await parser.getText();

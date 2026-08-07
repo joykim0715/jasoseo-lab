@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { JobSummary } from "./JobSummary";
+import { readApiJson } from "@/lib/readApiJson";
 import { saveJob } from "@/lib/session";
 import type { JobPosting } from "@/lib/types";
 
@@ -60,10 +61,11 @@ export function IngestForm() {
         res = await fetch("/api/ingest", { method: "POST", body: form });
       }
 
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; job?: JobPosting }>(res);
       if (!res.ok) throw new Error(data.error || "분석 실패");
-      setJob(data.job as JobPosting);
-      saveJob(data.job as JobPosting);
+      if (!data.job) throw new Error("분석 결과가 비어 있습니다.");
+      setJob(data.job);
+      saveJob(data.job);
     } catch (err) {
       setError(err instanceof Error ? err.message : "분석 실패");
     } finally {

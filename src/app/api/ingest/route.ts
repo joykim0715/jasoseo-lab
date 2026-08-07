@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ingestFromText } from "@/lib/ingest/parseText";
 import { ingestFromUrl } from "@/lib/ingest/parseUrl";
-import { ingestFromFile } from "@/lib/ingest/parseFile";
-import { ingestFromImage } from "@/lib/ingest/parseImage";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -23,6 +21,7 @@ export async function POST(req: NextRequest) {
       const buffer = Buffer.from(await file.arrayBuffer());
 
       if (mode === "image") {
+        const { ingestFromImage } = await import("@/lib/ingest/parseImage");
         const job = await ingestFromImage({
           buffer,
           mimeType: file.type || "image/png",
@@ -31,6 +30,7 @@ export async function POST(req: NextRequest) {
       }
 
       if (mode === "file") {
+        const { ingestFromFile } = await import("@/lib/ingest/parseFile");
         const job = await ingestFromFile({
           buffer,
           filename: file.name,
@@ -61,6 +61,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "mode가 필요합니다." }, { status: 400 });
   } catch (err) {
     const message = err instanceof Error ? err.message : "공고 분석에 실패했습니다.";
-    return NextResponse.json({ error: message }, { status: 400 });
+    console.error("[api/ingest]", err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

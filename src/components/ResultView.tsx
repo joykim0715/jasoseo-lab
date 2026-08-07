@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { CopyButton } from "./CopyButton";
+import { readApiJson } from "@/lib/readApiJson";
 import { loadJob, loadResult, loadSetup, saveResult } from "@/lib/session";
 import type { GenerateResult, JobPosting, SetupConfig } from "@/lib/types";
 
@@ -40,8 +41,11 @@ export function ResultView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job, setup }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; result?: GenerateResult }>(
+        res,
+      );
       if (!res.ok) throw new Error(data.error || "생성 실패");
+      if (!data.result) throw new Error("생성 결과가 비어 있습니다.");
       setResult(data.result);
       saveResult(data.result);
     } catch (err) {
@@ -67,8 +71,11 @@ export function ResultView() {
           previous: result,
         }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; result?: GenerateResult }>(
+        res,
+      );
       if (!res.ok) throw new Error(data.error || "재생성 실패");
+      if (!data.result) throw new Error("재생성 결과가 비어 있습니다.");
       setResult(data.result);
       saveResult(data.result);
     } catch (err) {
