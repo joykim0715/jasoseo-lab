@@ -257,14 +257,38 @@ function parseLlmJson<T>(text: string): T {
   throw new Error(`LLM JSON 파싱 실패: ${lastErr?.message ?? "unknown"}`);
 }
 
+export type LlmRoute = "fast" | "quality";
+
+/**
+ * fast: Groq/OpenAI → Gemini (구조화·추출용)
+ * quality: Gemini → Groq/OpenAI (한국어 자소서 문장용)
+ */
 async function withProviderFallback<T>(
   label: string,
   runPrimary: () => Promise<T>,
   runGemini: () => Promise<T>,
+  route: LlmRoute = "fast",
 ): Promise<T> {
   assertAnyProvider();
   const hasPrimary = Boolean(getPrimaryChat());
   const hasGemini = Boolean(getGemini());
+
+  if (route === "quality" && hasGemini) {
+    try {
+      return await runGemini();
+    } catch (geminiErr) {
+      markGeminiQuotaIfNeeded(geminiErr);
+      if (hasPrimary) {
+        console.warn(`[llm] Gemini ${label} failed → Groq/OpenAI:`, geminiErr);
+        try {
+          return await runPrimary();
+        } catch (primaryErr) {
+          throw new Error(formatProviderError(primaryErr, geminiErr));
+        }
+      }
+      throw new Error(formatProviderError(undefined, geminiErr));
+    }
+  }
 
   if (hasPrimary) {
     try {
@@ -415,11 +439,14 @@ export async function llmText(params: {
   system: string;
   user: string;
   maxTokens?: number;
+  /** quality면 Gemini 우선(한국어 문장), 기본 fast는 Groq 우선 */
+  route?: LlmRoute;
 }): Promise<string> {
   return withProviderFallback(
     "text",
     () => runPrimaryText(params),
     () => runGeminiText(params),
+    params.route ?? "fast",
   );
 }
 
@@ -511,6 +538,8 @@ export async function llmJson<T>(params: {
   user: string;
   maxTokens?: number;
   responseSchema?: ResponseSchema;
+  /** quality면 Gemini 우선(한국어 문장), 기본 fast는 Groq 우선 */
+  route?: LlmRoute;
 }): Promise<T> {
   return withProviderFallback(
     "json",
@@ -530,6 +559,7 @@ export async function llmJson<T>(params: {
         useGemini: true,
         responseSchema: params.responseSchema,
       }),
+    params.route ?? "fast",
   );
 }
 

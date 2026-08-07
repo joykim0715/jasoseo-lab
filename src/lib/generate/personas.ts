@@ -112,6 +112,7 @@ Keep each string short (under 80 chars). Avoid quotes inside strings.`,
       }),
       maxTokens: 2500,
       responseSchema: PERSONA_SCHEMA,
+      route: "fast",
     });
 
     const personas = normalizePersonas(parsed.personas ?? []);

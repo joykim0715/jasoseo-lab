@@ -6,6 +6,7 @@ import type {
   CandidateProfile,
   EssayAnswer,
   EssayQuestion,
+  ExperienceEpisode,
   GenerateResult,
   HiringPersona,
   JobPosting,
@@ -102,6 +103,36 @@ function checkConstraints(
   return notes;
 }
 
+function formatEpisode(e: ExperienceEpisode): string {
+  const parts = [
+    `id=${e.id}`,
+    `제목=${e.title}`,
+    e.organization ? `조직=${e.organization}` : "",
+    e.role ? `역할=${e.role}` : "",
+    e.period ? `기간=${e.period}` : "",
+    e.situation ? `상황=${e.situation}` : "",
+    e.task ? `과제=${e.task}` : "",
+    e.action ? `행동=${e.action}` : "",
+    e.result ? `결과=${e.result}` : "",
+    e.metrics ? `지표=${e.metrics}` : "",
+    e.highlights.length ? `하이라이트=${e.highlights.join("; ")}` : "",
+    e.skills.length ? `스킬=${e.skills.join(", ")}` : "",
+    e.tags.length ? `태그=${e.tags.join(", ")}` : "",
+  ];
+  return `- ${parts.filter(Boolean).join(" | ")}`;
+}
+
+const DRAFT_SYSTEM = `당신은 국내 대기업·스타트업 합격 자소서를 다수 작성한 한국어 자기소개서 전문 라이터입니다.
+
+작성 원칙:
+1) 제공된 경험·지표만 사용. 없는 사실·수치·직함 날조 금지.
+2) AI 티 나는 상투어 금지. (예: "~에 기여하고자 합니다" 남발, "열정적인", "다양한 경험")
+3) 추상 주장 대신 구체 행동·의사결정·수치·학습을 쓴다.
+4) 문단은 2~4개. 각 문단 역할이 분명해야 한다 (핵심→근거→의미/포지션 연결).
+5) 채용 페르소나의 선호를 반영하고 레드플래그는 피한다.
+6) 존댓말 완결 문장. 복사해 바로 제출 가능한 완성본만 출력.
+7) body에는 문단 구분을 \\n\\n 로 넣는다.`;
+
 async function draftOne(params: {
   profile: CandidateProfile;
   job: JobPosting;
@@ -114,23 +145,19 @@ async function draftOne(params: {
 }): Promise<{ body: string; usedEpisodeIds: string[] }> {
   const limitNote =
     params.question.charLimit > 0
-      ? `글자 수 제한: ${params.question.charLimit}자 (${params.question.countSpaces ? "공백 포함" : "공백 제외"})`
+      ? `글자 수 제한: ${params.question.charLimit}자 (${params.question.countSpaces ? "공백 포함" : "공백 제외"}). 초안은 제한의 85~100% 분량으로 작성.`
       : "글자 수 제한 없음";
 
   const freeFormHint = params.freeForm
-    ? "\n국내 기업 표준 자소서 항목(성장과정·성격 장단점·지원동기·직무역량/경험·입사 후 포부) 관행에 맞게, 해당 항목의 평가 목적에 충실한 구조로 작성하세요."
+    ? "\n국내 기업 표준 자소서 항목(성장과정·성격 장단점·지원동기·직무역량/경험·입사 후 포부) 관행과 평가 목적에 맞게 쓰세요."
     : "";
 
   const result = await llmJson<{
     body: string;
     usedEpisodeIds: string[];
   }>({
-    system: `당신은 한국어 자기소개서 전문 라이터입니다.
-지원자 실제 경험만 사용해 문항별 답변을 작성합니다.
-채용 담당 페르소나들의 심사 포인트를 반영하되, 과도한 미사여구는 피합니다.
-문장·문단의 구성·논리·흐름 제약을 우선 준수하고, 읽히는 완결된 글로 작성합니다.
-본문은 복사해 바로 붙여넣을 수 있는 완성된 문장으로만 작성합니다.
-JSON의 body 문자열 안에서는 줄바꿈 대신 공백으로 이어서 쓰고, 따옴표는 피하세요.${freeFormHint}`,
+    route: "quality",
+    system: `${DRAFT_SYSTEM}${freeFormHint}`,
     responseSchema: {
       type: SchemaType.OBJECT,
       properties: {
@@ -153,7 +180,14 @@ JSON의 body 문자열 안에서는 줄바꿈 대신 공백으로 이어서 쓰�
         skills: params.profile.skills,
         education: params.profile.education,
         certifications: params.profile.certifications.slice(0, 8),
-        portfolioUrl: params.profile.portfolioUrl,
+        works: params.profile.works.slice(0, 6).map((w) => ({
+          title: w.title,
+          category: w.category,
+          description: w.description,
+          role: w.role,
+          metrics: w.metrics,
+          tags: w.tags,
+        })),
       },
       job: {
         company: params.job.company,
@@ -164,21 +198,29 @@ JSON의 body 문자열 안에서는 줄바꿈 대신 공백으로 이어서 쓰�
         keywords: params.job.keywords,
         cultureSignals: params.job.cultureSignals,
       },
-      personas: params.personas,
+      personas: params.personas.map((p) => ({
+        name: p.name,
+        title: p.title,
+        focus: p.focus,
+        likes: p.likes,
+        redFlags: p.redFlags,
+        weight: p.weight,
+      })),
       selectedEpisodes: params.episodesSummary,
-      pastEssaySamples: params.essaySamples,
+      pastEssaySamples: params.essaySamples || "(과거 자소서 샘플 없음 — 톤은 담백·구체적으로)",
       question: {
         title: params.question.title,
         prompt: params.question.prompt,
       },
       constraints: constraintLines(params.constraints),
       limitNote,
-      outputSchema: {
-        body: "완성된 자소서 본문 문자열",
-        usedEpisodeIds: "사용한 에피소드 id 배열",
-      },
+      writingBrief: [
+        "문항이 묻는 것에만 집중해 답한다.",
+        "경험 1~2개를 깊게 쓰고, 나열식으로 여러 개를 얇게 쓰지 않는다.",
+        "마지막에 지원 회사·포지션과의 연결을 한 문장으로 분명히 한다.",
+      ],
     }),
-    maxTokens: 4000,
+    maxTokens: 4500,
   });
 
   return {
@@ -187,33 +229,82 @@ JSON의 body 문자열 안에서는 줄바꿈 대신 공백으로 이어서 쓰�
   };
 }
 
+/** 초안을 윤문·구체화 (Gemini 우선) */
+async function polishBody(params: {
+  body: string;
+  question: EssayQuestion;
+  job: JobPosting;
+  constraints: WritingConstraints;
+  personas: HiringPersona[];
+}): Promise<string> {
+  const limitHint =
+    params.question.charLimit > 0
+      ? `최종 분량은 ${params.question.charLimit}자 ${params.question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내.`
+      : "";
+
+  const polished = await llmText({
+    route: "quality",
+    system: `당신은 한국어 자소서 윤문 편집자입니다.
+사실·수치·고유명사는 유지하고, 문장만 더 날카롭고 자연스럽게 다듬습니다.
+상투어·중복·느슨한 연결을 제거하고, 인과와 본인 기여를 선명히 합니다.
+본문만 출력하세요. 설명·머리말 금지.`,
+    user: [
+      `회사: ${params.job.company} / 포지션: ${params.job.role}`,
+      `문항: ${params.question.title}`,
+      params.question.prompt ? `문항 상세: ${params.question.prompt}` : "",
+      `제약: ${constraintLines(params.constraints).join(" · ")}`,
+      `심사 포인트: ${params.personas
+        .slice(0, 3)
+        .map((p) => `${p.title}(${p.focus})`)
+        .join(" / ")}`,
+      limitHint,
+      "",
+      "다음 초안을 윤문하세요:",
+      params.body,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    maxTokens: 3500,
+  });
+
+  return polished.trim() || params.body;
+}
+
 async function compressToLimit(
   body: string,
   question: EssayQuestion,
 ): Promise<string> {
-  if (question.charLimit <= 0 || isWithinLimit(body, question.charLimit, question.countSpaces)) {
+  if (
+    question.charLimit <= 0 ||
+    isWithinLimit(body, question.charLimit, question.countSpaces)
+  ) {
     return body;
   }
 
   const compressed = await llmText({
-    system: "한국어 자소서 문장을 의미 유지하며 압축합니다. 본문만 출력하세요.",
-    user: `다음 글을 ${question.charLimit}자 ${question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내로 압축하세요.\n\n${body}`,
-    maxTokens: 2000,
+    route: "quality",
+    system:
+      "한국어 자소서 문장을 의미·수치·본인 기여를 유지하며 압축합니다. 본문만 출력하세요.",
+    user: `다음 글을 ${question.charLimit}자 ${question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내로 압축하세요. 핵심 성과와 인과는 남기세요.\n\n${body}`,
+    maxTokens: 2500,
   });
 
   let text = compressed.trim();
-  // Hard trim fallback if still over
-  for (let i = 0; i < 3 && !isWithinLimit(text, question.charLimit, question.countSpaces); i++) {
+  for (
+    let i = 0;
+    i < 2 && !isWithinLimit(text, question.charLimit, question.countSpaces);
+    i++
+  ) {
     const extra = await llmText({
-      system: "더 짧게. 본문만.",
+      route: "quality",
+      system: "더 짧게. 핵심만. 본문만.",
       user: `목표 ${question.charLimit}자. 현재 ${countChars(text, question.countSpaces)}자.\n\n${text}`,
-      maxTokens: 1600,
+      maxTokens: 2000,
     });
     text = extra.trim();
   }
 
   if (!isWithinLimit(text, question.charLimit, question.countSpaces)) {
-    // character-wise trim (Unicode aware)
     const chars = [...text];
     if (question.countSpaces) {
       text = chars.slice(0, question.charLimit).join("");
@@ -248,18 +339,13 @@ export async function generateEssays(params: {
     : await buildPersonas(params.job);
 
   const { episodes, notes } = selectEpisodes(params.profile, params.job);
-  const episodesSummary = episodes
-    .map(
-      (e) =>
-        `- id=${e.id} | ${e.title} | tags=${e.tags.join(",")}\n  ${e.highlights.join(" / ")}`,
-    )
-    .join("\n");
+  const episodesSummary = episodes.map(formatEpisode).join("\n");
 
   const essaySamples = params.profile.essayArchive
     .slice(0, 4)
     .map(
       (a) =>
-        `Q: ${a.question}\nA: ${a.answer.slice(0, 500)}${a.rating ? ` (rating:${a.rating})` : ""}`,
+        `Q: ${a.question}\nA: ${a.answer.slice(0, 700)}${a.rating ? ` (rating:${a.rating})` : ""}`,
     )
     .join("\n---\n");
 
@@ -284,7 +370,21 @@ export async function generateEssays(params: {
       constraints: params.setup.constraints,
       freeForm: Boolean(params.setup.freeForm),
     });
-    const body = await compressToLimit(draft.body, question);
+
+    let body = draft.body;
+    try {
+      body = await polishBody({
+        body,
+        question,
+        job: params.job,
+        constraints: params.setup.constraints,
+        personas,
+      });
+    } catch (err) {
+      console.warn("[essay] polish skipped:", err);
+    }
+
+    body = await compressToLimit(body, question);
     const charCount = countChars(body, question.countSpaces);
     answers.push({
       questionId: question.id,
