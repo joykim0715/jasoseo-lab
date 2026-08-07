@@ -23,12 +23,15 @@ let gemini: GoogleGenerativeAI | null = null;
 
 /** OpenAI 결제/쿼터 이슈 시 이후 GPT 호출 스킵 */
 let openaiBillingExhausted = false;
+/** Gemini 429/쿼터 초과 시 이후 Gemini 호출 스킵 (한도 추가 소모 방지) */
+let geminiQuotaExhausted = false;
 
 export function llmStatus() {
   return {
     openaiConfigured:
       Boolean(process.env.OPENAI_API_KEY) && !openaiBillingExhausted,
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    geminiConfigured:
+      Boolean(process.env.GEMINI_API_KEY) && !geminiQuotaExhausted,
     /** @deprecated Claude 제거 — 하위 호환용 */
     claudeConfigured: false,
     primary: openaiBillingExhausted
@@ -53,6 +56,7 @@ function getOpenAI() {
 }
 
 function getGemini() {
+  if (geminiQuotaExhausted) return null;
   if (!process.env.GEMINI_API_KEY) return null;
   if (!gemini) {
     gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -61,27 +65,52 @@ function getGemini() {
 }
 
 function assertAnyProvider() {
-  if (!getOpenAI() && !getGemini()) {
+  if (getOpenAI() || getGemini()) return;
+
+  if (openaiBillingExhausted && geminiQuotaExhausted) {
     throw new Error(
-      "OPENAI_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다.",
+      "OpenAI 결제 잔액이 부족하고 Gemini 요청 한도도 초과되었습니다. platform.openai.com 에서 OpenAI 크레딧을 충전한 뒤 다시 시도해 주세요.",
     );
   }
+  if (openaiBillingExhausted) {
+    throw new Error(
+      "OpenAI 결제 잔액/크레딧이 부족합니다. API 키만으로는 호출되지 않습니다. platform.openai.com/settings/organization/billing 에서 충전하세요.",
+    );
+  }
+  if (geminiQuotaExhausted) {
+    throw new Error(
+      "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 OpenAI 크레딧을 충전하세요.",
+    );
+  }
+  throw new Error(
+    "OPENAI_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다.",
+  );
 }
 
 function markOpenAIBillingIfNeeded(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
-  if (
-    /insufficient_quota|billing|quota|credit|payment|rate_limit_exceeded/i.test(
-      msg,
-    )
-  ) {
-    // rate limit은 일시적일 수 있어 billing/quota만 영구 스킵
-    if (/insufficient_quota|billing|credit|payment/i.test(msg)) {
-      openaiBillingExhausted = true;
-      console.warn(
-        "[llm] OpenAI billing/quota exhausted — skipping OpenAI for this process",
-      );
-    }
+  // rate_limit 은 일시적이므로 영구 스킵하지 않음
+  if (/insufficient_quota|billing_not_active|credit|payment|exceeded your current quota/i.test(msg)) {
+    openaiBillingExhausted = true;
+    console.warn(
+      "[llm] OpenAI billing/quota exhausted — skipping OpenAI for this process",
+    );
+  }
+}
+
+function isGeminiQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /429|Too Many Requests|RESOURCE_EXHAUSTED|exceeded your|quota/i.test(
+    msg,
+  );
+}
+
+function markGeminiQuotaIfNeeded(err: unknown) {
+  if (isGeminiQuotaError(err)) {
+    geminiQuotaExhausted = true;
+    console.warn(
+      "[llm] Gemini quota/rate limited — skipping Gemini for this process",
+    );
   }
 }
 
@@ -246,9 +275,9 @@ function formatProviderError(openaiErr?: unknown, geminiErr?: unknown): string {
   const openaiMsg = openaiErr instanceof Error ? openaiErr.message : "";
   const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "";
 
-  if (/insufficient_quota|billing|credit|payment/i.test(openaiMsg)) {
+  if (/insufficient_quota|billing|credit|payment|exceeded your current quota/i.test(openaiMsg)) {
     parts.push(
-      "OpenAI 크레딧/결제 잔액이 부족합니다. platform.openai.com 에서 충전하거나 GEMINI만으로 계속 사용할 수 있습니다.",
+      "OpenAI 크레딧/결제 잔액이 부족합니다. API 키만으로는 부족하니 platform.openai.com 결제(Billing)에서 충전하세요.",
     );
   } else if (/incorrect api key|invalid_api_key|401/i.test(openaiMsg)) {
     parts.push("OpenAI API 키가 유효하지 않습니다.");
@@ -258,6 +287,10 @@ function formatProviderError(openaiErr?: unknown, geminiErr?: unknown): string {
 
   if (/API_KEY|api key|403|401|invalid.*key/i.test(geminiMsg)) {
     parts.push("Gemini API 키가 유효하지 않습니다.");
+  } else if (/429|Too Many Requests|RESOURCE_EXHAUSTED|exceeded your/i.test(geminiMsg)) {
+    parts.push(
+      "Gemini 무료/요청 한도(429)를 초과했습니다. 잠시 기다리거나 OpenAI 크레딧을 충전하세요.",
+    );
   } else if (/no longer available|not found|404|not supported/i.test(geminiMsg)) {
     parts.push(
       `Gemini 모델을 사용할 수 없습니다 (시도: ${GEMINI_MODEL_CANDIDATES.join(", ")}).`,
@@ -343,6 +376,12 @@ async function runGeminiText(params: {
       return result.response.text() ?? "";
     } catch (err) {
       lastErr = err;
+      if (isGeminiQuotaError(err)) {
+        markGeminiQuotaIfNeeded(err);
+        throw new Error(
+          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 OpenAI 크레딧을 충전하세요.",
+        );
+      }
       if (isGeminiModelMissingError(err)) {
         console.warn(`[llm] Gemini model unavailable: ${modelName}`, err);
         if (resolvedGeminiModel === modelName) resolvedGeminiModel = null;
@@ -559,6 +598,12 @@ async function runGeminiVision(params: {
       return result.response.text() ?? "";
     } catch (err) {
       lastErr = err;
+      if (isGeminiQuotaError(err)) {
+        markGeminiQuotaIfNeeded(err);
+        throw new Error(
+          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 OpenAI 크레딧을 충전하세요.",
+        );
+      }
       if (isGeminiModelMissingError(err)) {
         console.warn(`[llm] Gemini vision model unavailable: ${modelName}`, err);
         if (resolvedGeminiModel === modelName) resolvedGeminiModel = null;
