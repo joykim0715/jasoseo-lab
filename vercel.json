@@ -1,4 +1,12 @@
 {
   "framework": "nextjs",
-  "regions": ["icn1"]
+  "regions": ["icn1"],
+  "functions": {
+    "src/app/api/generate/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/generate/regenerate/route.ts": {
+      "maxDuration": 300
+    }
+  }
 }

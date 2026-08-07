@@ -136,7 +136,8 @@ ${KOREAN_ONLY_RULE}
 5) 채용 페르소나의 선호를 반영하고 레드플래그는 피한다.
 6) 존댓말 완결 문장. 복사해 바로 제출 가능한 완성본만 출력.
 7) body에는 문단 구분을 \\n\\n 로 넣는다.
-8) 중국어·일본어·베트남어·영어 문장을 한 글자도 섞지 않는다.`;
+8) 중국어·일본어·베트남어·영어 문장을 한 글자도 섞지 않는다.
+9) 별도 윤문 없이 바로 제출 가능한 완성도를 한 번에 맞춘다. 상투어·중복을 초안에서 제거한다.`;
 
 async function draftOne(params: {
   profile: CandidateProfile;
@@ -234,49 +235,6 @@ async function draftOne(params: {
   };
 }
 
-/** 초안을 윤문·구체화 (Gemini 우선) */
-async function polishBody(params: {
-  body: string;
-  question: EssayQuestion;
-  job: JobPosting;
-  constraints: WritingConstraints;
-  personas: HiringPersona[];
-}): Promise<string> {
-  const limitHint =
-    params.question.charLimit > 0
-      ? `최종 분량은 ${params.question.charLimit}자 ${params.question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내.`
-      : "";
-
-  const polished = await llmText({
-    route: "quality",
-    system: `당신은 한국어 자소서 윤문 편집자입니다.
-${KOREAN_ONLY_RULE}
-사실·수치·고유명사는 유지하고, 문장만 더 날카롭고 자연스럽게 다듬습니다.
-상투어·중복·느슨한 연결을 제거하고, 인과와 본인 기여를 선명히 합니다.
-외국어·한자·가나가 있으면 한국어로 바꿔 윤문합니다.
-본문만 출력하세요. 설명·머리말 금지.`,
-    user: [
-      `회사: ${params.job.company} / 포지션: ${params.job.role}`,
-      `문항: ${params.question.title}`,
-      params.question.prompt ? `문항 상세: ${params.question.prompt}` : "",
-      `제약: ${constraintLines(params.constraints).join(" · ")}`,
-      `심사 포인트: ${params.personas
-        .slice(0, 3)
-        .map((p) => `${p.title}(${p.focus})`)
-        .join(" / ")}`,
-      limitHint,
-      "",
-      "다음 초안을 윤문하세요:",
-      params.body,
-    ]
-      .filter(Boolean)
-      .join("\n"),
-    maxTokens: 3500,
-  });
-
-  return polished.trim() || params.body;
-}
-
 async function compressToLimit(
   body: string,
   question: EssayQuestion,
@@ -365,9 +323,27 @@ export async function generateEssays(params: {
     throw new Error("생성할 문항이 없습니다.");
   }
 
-  const answers: EssayAnswer[] = [];
+  /** 문항 병렬 생성 (한도·타임아웃 균형: 동시 2개) */
+  async function mapPool<T, R>(
+    items: T[],
+    concurrency: number,
+    fn: (item: T) => Promise<R>,
+  ): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let cursor = 0;
+    async function worker() {
+      while (cursor < items.length) {
+        const idx = cursor;
+        cursor += 1;
+        results[idx] = await fn(items[idx]);
+      }
+    }
+    const n = Math.min(concurrency, items.length);
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    return results;
+  }
 
-  for (const question of questions) {
+  async function writeOne(question: EssayQuestion): Promise<EssayAnswer> {
     const draft = await draftOne({
       profile: params.profile,
       job: params.job,
@@ -379,22 +355,9 @@ export async function generateEssays(params: {
       freeForm: Boolean(params.setup.freeForm),
     });
 
-    let body = draft.body;
-    try {
-      body = await polishBody({
-        body,
-        question,
-        job: params.job,
-        constraints: params.setup.constraints,
-        personas,
-      });
-    } catch (err) {
-      console.warn("[essay] polish skipped:", err);
-    }
+    // 윤문 패스 제거(타임아웃 방지). 초안 품질 + 한글 게이트로 대체.
+    let body = await compressToLimit(draft.body, question);
 
-    body = await compressToLimit(body, question);
-
-    // 고정: 한글 외 문자 검출 → 재작성 (파이프라인 필수 단계)
     let koreanNotes: string[] = [];
     try {
       let enforced = await enforceKoreanOnly({
@@ -404,7 +367,6 @@ export async function generateEssays(params: {
         questionTitle: question.title,
       });
       body = enforced.body;
-      // 재작성으로 분량 초과 시 압축 후 한글 검사 한 번 더
       if (
         question.charLimit > 0 &&
         !isWithinLimit(body, question.charLimit, question.countSpaces)
@@ -429,7 +391,7 @@ export async function generateEssays(params: {
     }
 
     const charCount = countChars(body, question.countSpaces);
-    answers.push({
+    return {
       questionId: question.id,
       title: question.title,
       prompt: question.prompt,
@@ -449,8 +411,10 @@ export async function generateEssays(params: {
         ...koreanNotes,
       ],
       usedEpisodeIds: draft.usedEpisodeIds,
-    });
+    };
   }
+
+  const answers = await mapPool(questions, 2, writeOne);
 
   const personaFeedback = personas
     .map(

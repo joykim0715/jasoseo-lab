@@ -52,7 +52,7 @@ export async function enforceKoreanOnly(params: {
   let text = params.body.trim();
   let rewritten = false;
 
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 2; i++) {
     const issues = findNonKoreanIssues(text);
     if (!issues.length) {
       return { body: text, rewritten, remainingIssues: [] };

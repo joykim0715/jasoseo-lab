@@ -5,7 +5,7 @@ import { loadCandidateProfile } from "@/lib/profile/loadProfile";
 import type { GenerateResult, HiringPersona, JobPosting, SetupConfig } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   try {

@@ -6,7 +6,8 @@ import { loadCandidateProfile } from "@/lib/profile/loadProfile";
 import type { JobPosting, SetupConfig } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+/** 문항 5개 × LLM 다단 호출 — Pro 기준 최대 300초 */
+export const maxDuration = 300;
 
 const questionSchema = z.object({
   id: z.string().min(1),
