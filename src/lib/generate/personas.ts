@@ -24,7 +24,7 @@ weight: 0.1-1.0 relative influence. Respond in Korean for text fields.`,
       cultureSignals: job.cultureSignals,
       keywords: job.keywords,
     }),
-    maxTokens: 2000,
+    maxTokens: 3500,
   });
 
   return (parsed.personas ?? []).slice(0, 4).map((p, i) => ({

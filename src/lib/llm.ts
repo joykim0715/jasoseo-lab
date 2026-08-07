@@ -40,11 +40,43 @@ function assertAnyProvider() {
   }
 }
 
-function isFallbackWorthy(err: unknown): boolean {
-  if (!(err instanceof Error)) return true;
-  const msg = `${err.name} ${err.message}`.toLowerCase();
-  if (msg.includes("json") && msg.includes("parse")) return false;
+function isFallbackWorthy(_err: unknown): boolean {
+  // Provider/API 오류뿐 아니라 JSON 파싱 실패도 다른 모델로 재시도
   return true;
+}
+
+/** LLM 응답에서 JSON 객체/배열 본문만 추출 */
+function extractJsonPayload(text: string): string {
+  let cleaned = text.trim();
+  cleaned = cleaned
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  const objStart = cleaned.indexOf("{");
+  const arrStart = cleaned.indexOf("[");
+  let start = -1;
+  if (objStart === -1) start = arrStart;
+  else if (arrStart === -1) start = objStart;
+  else start = Math.min(objStart, arrStart);
+
+  if (start === -1) return cleaned;
+
+  const open = cleaned[start];
+  const close = open === "{" ? "}" : "]";
+  const end = cleaned.lastIndexOf(close);
+  if (end > start) return cleaned.slice(start, end + 1);
+  return cleaned.slice(start);
+}
+
+function parseLlmJson<T>(text: string): T {
+  const payload = extractJsonPayload(text);
+  try {
+    return JSON.parse(payload) as T;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : "unknown";
+    throw new Error(`LLM JSON 파싱 실패: ${detail}`);
+  }
 }
 
 async function withProviderFallback<T>(
@@ -122,6 +154,7 @@ async function runGeminiText(params: {
   system: string;
   user: string;
   maxTokens?: number;
+  jsonMode?: boolean;
 }): Promise<string> {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
@@ -130,6 +163,9 @@ async function runGeminiText(params: {
     systemInstruction: params.system,
     generationConfig: {
       maxOutputTokens: params.maxTokens ?? 4096,
+      ...(params.jsonMode
+        ? { responseMimeType: "application/json" as const }
+        : {}),
     },
   });
   const result = await model.generateContent(params.user);
@@ -148,20 +184,93 @@ export async function llmText(params: {
   );
 }
 
+async function repairJsonText(
+  broken: string,
+  maxTokens?: number,
+  preferGemini?: boolean,
+): Promise<string> {
+  const system =
+    "You repair malformed JSON. Output valid JSON only. No markdown fences, no commentary.";
+  const user = `Fix this into valid JSON:\n\n${broken.slice(0, 12000)}`;
+  const run = async (useGemini: boolean) =>
+    useGemini
+      ? runGeminiText({ system, user, maxTokens: maxTokens ?? 4096, jsonMode: true })
+      : runClaudeText({ system, user, maxTokens: maxTokens ?? 4096 });
+
+  if (preferGemini && getGemini()) {
+    try {
+      return await run(true);
+    } catch {
+      if (getAnthropic()) return run(false);
+      throw new Error("JSON 복구 실패");
+    }
+  }
+  if (getAnthropic()) {
+    try {
+      return await run(false);
+    } catch {
+      if (getGemini()) return run(true);
+      throw new Error("JSON 복구 실패");
+    }
+  }
+  return run(true);
+}
+
+async function completeJson<T>(params: {
+  system: string;
+  user: string;
+  maxTokens?: number;
+  useGemini: boolean;
+}): Promise<T> {
+  const system = `${params.system}\n\nRespond with valid JSON only. No markdown fences.`;
+  const text = params.useGemini
+    ? await runGeminiText({
+        system,
+        user: params.user,
+        maxTokens: params.maxTokens,
+        jsonMode: true,
+      })
+    : await runClaudeText({
+        system,
+        user: params.user,
+        maxTokens: params.maxTokens,
+      });
+
+  try {
+    return parseLlmJson<T>(text);
+  } catch (parseErr) {
+    console.warn("[llm] JSON parse failed, attempting repair:", parseErr);
+    const repaired = await repairJsonText(
+      text,
+      params.maxTokens,
+      params.useGemini,
+    );
+    return parseLlmJson<T>(repaired);
+  }
+}
+
 export async function llmJson<T>(params: {
   system: string;
   user: string;
   maxTokens?: number;
 }): Promise<T> {
-  const text = await llmText({
-    ...params,
-    system: `${params.system}\n\nRespond with valid JSON only. No markdown fences.`,
-  });
-  const cleaned = text
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-  return JSON.parse(cleaned) as T;
+  return withProviderFallback(
+    "json",
+    () =>
+      completeJson<T>({
+        system: params.system,
+        user: params.user,
+        maxTokens: params.maxTokens,
+        useGemini: false,
+      }),
+    () =>
+      completeJson<T>({
+        system: params.system,
+        user: params.user,
+        maxTokens: params.maxTokens,
+        useGemini: true,
+      }),
+  );
 }
 
 type MediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";

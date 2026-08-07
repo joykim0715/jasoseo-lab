@@ -133,7 +133,7 @@ async function draftOne(params: {
         usedEpisodeIds: "사용한 에피소드 id 배열",
       },
     }),
-    maxTokens: 2500,
+    maxTokens: 4000,
   });
 
   return {
