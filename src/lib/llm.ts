@@ -6,7 +6,17 @@ import {
 } from "@google/generative-ai";
 
 const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5-20250929";
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+
+/** 환경변수 우선, 없으면 최신 → 안정 순으로 폴백 */
+const GEMINI_MODEL_CANDIDATES = [
+  process.env.GEMINI_MODEL,
+  "gemini-3.5-flash",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-flash-latest",
+].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
+
+let resolvedGeminiModel: string | null = null;
 
 let anthropic: Anthropic | null = null;
 let gemini: GoogleGenerativeAI | null = null;
@@ -224,10 +234,12 @@ function formatProviderError(claudeErr?: unknown, geminiErr?: unknown): string {
     parts.push(`Claude: ${claudeMsg.slice(0, 180)}`);
   }
 
-  if (/no longer available|not found|404/i.test(geminiMsg)) {
-    parts.push("Gemini 모델명을 확인해 주세요 (기본: gemini-2.5-flash).");
-  } else if (/API_KEY|api key|403|401/i.test(geminiMsg)) {
+  if (/API_KEY|api key|403|401|invalid.*key/i.test(geminiMsg)) {
     parts.push("Gemini API 키가 유효하지 않습니다.");
+  } else if (/no longer available|not found|404|not supported/i.test(geminiMsg)) {
+    parts.push(
+      `Gemini 모델을 사용할 수 없습니다 (시도: ${GEMINI_MODEL_CANDIDATES.join(", ")}).`,
+    );
   } else if (geminiMsg) {
     parts.push(`Gemini: ${geminiMsg.slice(0, 180)}`);
   }
@@ -257,6 +269,13 @@ async function runClaudeText(params: {
   }
 }
 
+function isGeminiModelMissingError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no longer available|not found|404|is not found|not supported for/i.test(
+    msg,
+  );
+}
+
 async function runGeminiText(params: {
   system: string;
   user: string;
@@ -266,23 +285,48 @@ async function runGeminiText(params: {
 }): Promise<string> {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
-  const model = client.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: params.system,
-    generationConfig: {
-      maxOutputTokens: params.maxTokens ?? 4096,
-      ...(params.jsonMode || params.responseSchema
-        ? {
-            responseMimeType: "application/json" as const,
-            ...(params.responseSchema
-              ? { responseSchema: params.responseSchema }
-              : {}),
-          }
-        : {}),
-    },
-  });
-  const result = await model.generateContent(params.user);
-  return result.response.text() ?? "";
+
+  const models = resolvedGeminiModel
+    ? [
+        resolvedGeminiModel,
+        ...GEMINI_MODEL_CANDIDATES.filter((m) => m !== resolvedGeminiModel),
+      ]
+    : GEMINI_MODEL_CANDIDATES;
+
+  let lastErr: unknown;
+  for (const modelName of models) {
+    try {
+      const model = client.getGenerativeModel({
+        model: modelName,
+        systemInstruction: params.system,
+        generationConfig: {
+          maxOutputTokens: params.maxTokens ?? 4096,
+          ...(params.jsonMode || params.responseSchema
+            ? {
+                responseMimeType: "application/json" as const,
+                ...(params.responseSchema
+                  ? { responseSchema: params.responseSchema }
+                  : {}),
+              }
+            : {}),
+        },
+      });
+      const result = await model.generateContent(params.user);
+      resolvedGeminiModel = modelName;
+      return result.response.text() ?? "";
+    } catch (err) {
+      lastErr = err;
+      if (isGeminiModelMissingError(err)) {
+        console.warn(`[llm] Gemini model unavailable: ${modelName}`, err);
+        if (resolvedGeminiModel === modelName) resolvedGeminiModel = null;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("사용 가능한 Gemini 모델이 없습니다.");
 }
 
 export async function llmText(params: {
@@ -453,23 +497,48 @@ async function runGeminiVision(params: {
 }): Promise<string> {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
-  const model = client.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: params.system,
-    generationConfig: {
-      maxOutputTokens: params.maxTokens ?? 4096,
-    },
-  });
-  const result = await model.generateContent([
-    {
-      inlineData: {
-        mimeType: params.mediaType,
-        data: params.base64,
-      },
-    },
-    { text: params.user },
-  ]);
-  return result.response.text() ?? "";
+
+  const models = resolvedGeminiModel
+    ? [
+        resolvedGeminiModel,
+        ...GEMINI_MODEL_CANDIDATES.filter((m) => m !== resolvedGeminiModel),
+      ]
+    : GEMINI_MODEL_CANDIDATES;
+
+  let lastErr: unknown;
+  for (const modelName of models) {
+    try {
+      const model = client.getGenerativeModel({
+        model: modelName,
+        systemInstruction: params.system,
+        generationConfig: {
+          maxOutputTokens: params.maxTokens ?? 4096,
+        },
+      });
+      const result = await model.generateContent([
+        {
+          inlineData: {
+            mimeType: params.mediaType,
+            data: params.base64,
+          },
+        },
+        { text: params.user },
+      ]);
+      resolvedGeminiModel = modelName;
+      return result.response.text() ?? "";
+    } catch (err) {
+      lastErr = err;
+      if (isGeminiModelMissingError(err)) {
+        console.warn(`[llm] Gemini vision model unavailable: ${modelName}`, err);
+        if (resolvedGeminiModel === modelName) resolvedGeminiModel = null;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("사용 가능한 Gemini 모델이 없습니다.");
 }
 
 export async function llmVisionText(params: {
