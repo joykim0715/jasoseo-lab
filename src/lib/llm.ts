@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5-20250929";
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
 
 let anthropic: Anthropic | null = null;
 let gemini: GoogleGenerativeAI | null = null;
@@ -62,13 +62,43 @@ async function withProviderFallback<T>(
     } catch (err) {
       if (hasGemini && isFallbackWorthy(err)) {
         console.warn(`[llm] Claude ${label} failed → Gemini fallback:`, err);
-        return await runGemini();
+        try {
+          return await runGemini();
+        } catch (geminiErr) {
+          throw new Error(formatProviderError(err, geminiErr));
+        }
       }
-      throw err;
+      throw new Error(formatProviderError(err));
     }
   }
 
-  return await runGemini();
+  try {
+    return await runGemini();
+  } catch (geminiErr) {
+    throw new Error(formatProviderError(undefined, geminiErr));
+  }
+}
+
+function formatProviderError(claudeErr?: unknown, geminiErr?: unknown): string {
+  const parts: string[] = [];
+  const claudeMsg = claudeErr instanceof Error ? claudeErr.message : "";
+  const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "";
+
+  if (/credit balance is too low|billing|quota/i.test(claudeMsg)) {
+    parts.push("Claude 크레딧/결제 잔액이 부족합니다.");
+  } else if (claudeMsg) {
+    parts.push(`Claude: ${claudeMsg.slice(0, 180)}`);
+  }
+
+  if (/no longer available|not found|404/i.test(geminiMsg)) {
+    parts.push("Gemini 모델명을 확인해 주세요 (기본: gemini-3.5-flash).");
+  } else if (/API_KEY|api key|403|401/i.test(geminiMsg)) {
+    parts.push("Gemini API 키가 유효하지 않습니다.");
+  } else if (geminiMsg) {
+    parts.push(`Gemini: ${geminiMsg.slice(0, 180)}`);
+  }
+
+  return parts.join(" / ") || "LLM 호출에 실패했습니다.";
 }
 
 async function runClaudeText(params: {
