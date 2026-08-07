@@ -1,5 +1,6 @@
 import { llmJson, llmText, SchemaType, type ResponseSchema } from "../llm";
 import { countChars, isWithinLimit } from "./charCount";
+import { enforceKoreanOnly, KOREAN_ONLY_RULE } from "./koreanOnly";
 import { selectEpisodes } from "./match";
 import { buildPersonas } from "./personas";
 import type {
@@ -16,6 +17,7 @@ import type {
 
 /** 톤·품질 규칙은 항상 적용 (UI에서 고정) */
 const BASE_CONSTRAINTS = [
+  KOREAN_ONLY_RULE,
   "구체적 수치(지표)를 최소 1개 이상 포함",
   "지원 회사명·포지션을 자연스럽게 언급",
   "존댓말·격식체 사용",
@@ -124,6 +126,8 @@ function formatEpisode(e: ExperienceEpisode): string {
 
 const DRAFT_SYSTEM = `당신은 국내 대기업·스타트업 합격 자소서를 다수 작성한 한국어 자기소개서 전문 라이터입니다.
 
+${KOREAN_ONLY_RULE}
+
 작성 원칙:
 1) 제공된 경험·지표만 사용. 없는 사실·수치·직함 날조 금지.
 2) AI 티 나는 상투어 금지. (예: "~에 기여하고자 합니다" 남발, "열정적인", "다양한 경험")
@@ -131,7 +135,8 @@ const DRAFT_SYSTEM = `당신은 국내 대기업·스타트업 합격 자소서�
 4) 문단은 2~4개. 각 문단 역할이 분명해야 한다 (핵심→근거→의미/포지션 연결).
 5) 채용 페르소나의 선호를 반영하고 레드플래그는 피한다.
 6) 존댓말 완결 문장. 복사해 바로 제출 가능한 완성본만 출력.
-7) body에는 문단 구분을 \\n\\n 로 넣는다.`;
+7) body에는 문단 구분을 \\n\\n 로 넣는다.
+8) 중국어·일본어·베트남어·영어 문장을 한 글자도 섞지 않는다.`;
 
 async function draftOne(params: {
   profile: CandidateProfile;
@@ -245,8 +250,10 @@ async function polishBody(params: {
   const polished = await llmText({
     route: "quality",
     system: `당신은 한국어 자소서 윤문 편집자입니다.
+${KOREAN_ONLY_RULE}
 사실·수치·고유명사는 유지하고, 문장만 더 날카롭고 자연스럽게 다듬습니다.
 상투어·중복·느슨한 연결을 제거하고, 인과와 본인 기여를 선명히 합니다.
+외국어·한자·가나가 있으면 한국어로 바꿔 윤문합니다.
 본문만 출력하세요. 설명·머리말 금지.`,
     user: [
       `회사: ${params.job.company} / 포지션: ${params.job.role}`,
@@ -283,9 +290,10 @@ async function compressToLimit(
 
   const compressed = await llmText({
     route: "quality",
-    system:
-      "한국어 자소서 문장을 의미·수치·본인 기여를 유지하며 압축합니다. 본문만 출력하세요.",
-    user: `다음 글을 ${question.charLimit}자 ${question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내로 압축하세요. 핵심 성과와 인과는 남기세요.\n\n${body}`,
+    system: `한국어 자소서 문장을 의미·수치·본인 기여를 유지하며 압축합니다.
+${KOREAN_ONLY_RULE}
+본문만 출력하세요.`,
+    user: `다음 글을 ${question.charLimit}자 ${question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내로 압축하세요. 핵심 성과와 인과는 남기세요. 한글만 사용하세요.\n\n${body}`,
     maxTokens: 2500,
   });
 
@@ -297,7 +305,7 @@ async function compressToLimit(
   ) {
     const extra = await llmText({
       route: "quality",
-      system: "더 짧게. 핵심만. 본문만.",
+      system: `더 짧게. 핵심만. 한글만. 본문만.\n${KOREAN_ONLY_RULE}`,
       user: `목표 ${question.charLimit}자. 현재 ${countChars(text, question.countSpaces)}자.\n\n${text}`,
       maxTokens: 2000,
     });
@@ -385,6 +393,41 @@ export async function generateEssays(params: {
     }
 
     body = await compressToLimit(body, question);
+
+    // 고정: 한글 외 문자 검출 → 재작성 (파이프라인 필수 단계)
+    let koreanNotes: string[] = [];
+    try {
+      let enforced = await enforceKoreanOnly({
+        body,
+        company: params.job.company,
+        role: params.job.role,
+        questionTitle: question.title,
+      });
+      body = enforced.body;
+      // 재작성으로 분량 초과 시 압축 후 한글 검사 한 번 더
+      if (
+        question.charLimit > 0 &&
+        !isWithinLimit(body, question.charLimit, question.countSpaces)
+      ) {
+        body = await compressToLimit(body, question);
+        enforced = await enforceKoreanOnly({
+          body,
+          company: params.job.company,
+          role: params.job.role,
+          questionTitle: question.title,
+        });
+        body = enforced.body;
+      }
+      if (enforced.remainingIssues.length) {
+        koreanNotes = [
+          `한글 외 표기 잔존: ${enforced.remainingIssues.slice(0, 8).join(", ")}`,
+        ];
+      }
+    } catch (err) {
+      console.warn("[essay] korean-only enforce failed:", err);
+      koreanNotes = ["한글 전용 교정에 실패했습니다. 문항을 다시 생성해 주세요."];
+    }
+
     const charCount = countChars(body, question.countSpaces);
     answers.push({
       questionId: question.id,
@@ -397,11 +440,14 @@ export async function generateEssays(params: {
       withinLimit:
         question.charLimit <= 0 ||
         isWithinLimit(body, question.charLimit, question.countSpaces),
-      constraintNotes: checkConstraints(
-        body,
-        params.setup.constraints,
-        params.job.company,
-      ),
+      constraintNotes: [
+        ...checkConstraints(
+          body,
+          params.setup.constraints,
+          params.job.company,
+        ),
+        ...koreanNotes,
+      ],
       usedEpisodeIds: draft.usedEpisodeIds,
     });
   }
