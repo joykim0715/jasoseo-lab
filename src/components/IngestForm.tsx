@@ -17,6 +17,7 @@ type ProfileMeta = {
   workCount: number;
   notionConnected: boolean;
   anthropicConfigured?: boolean;
+  geminiConfigured?: boolean;
 };
 
 export function IngestForm() {
@@ -115,7 +116,25 @@ export function IngestForm() {
           >
             Notion {profile.notionConnected ? "연결" : "스냅샷"}
           </span>
-          {profile.anthropicConfigured === false && (
+          <span
+            className={`rounded-full border px-3 py-1 ${
+              profile.anthropicConfigured
+                ? "border-emerald-700/30 bg-emerald-50 text-emerald-800"
+                : "border-amber-700/30 bg-amber-50 text-amber-900"
+            }`}
+          >
+            Claude {profile.anthropicConfigured ? "주" : "미연결"}
+          </span>
+          <span
+            className={`rounded-full border px-3 py-1 ${
+              profile.geminiConfigured
+                ? "border-emerald-700/30 bg-emerald-50 text-emerald-800"
+                : "border-[var(--line)] bg-[var(--surface)] text-[var(--muted)]"
+            }`}
+          >
+            Gemini {profile.geminiConfigured ? "보조" : "미연결"}
+          </span>
+          {!profile.anthropicConfigured && !profile.geminiConfigured && (
             <span className="rounded-full border border-amber-700/30 bg-amber-50 px-3 py-1 text-amber-900">
               API 키 필요
             </span>

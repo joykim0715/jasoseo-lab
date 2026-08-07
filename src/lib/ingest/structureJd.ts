@@ -1,4 +1,4 @@
-import { claudeJson } from "../claude";
+import { llmJson } from "../llm";
 import type { JobPosting } from "../types";
 
 const STRUCTURE_SYSTEM = `You are a Korean recruiting analyst.
@@ -13,7 +13,7 @@ export async function structureJobPosting(
   priorWarnings: string[] = [],
 ): Promise<JobPosting> {
   const truncated = rawText.slice(0, 28000);
-  const parsed = await claudeJson<{
+  const parsed = await llmJson<{
     company?: string;
     role?: string;
     requirements?: string[];

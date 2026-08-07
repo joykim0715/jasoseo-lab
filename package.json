@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
+    "@google/generative-ai": "^0.24.1",
     "@notionhq/client": "^5.24.0",
     "cheerio": "^1.2.0",
     "mammoth": "^1.12.0",

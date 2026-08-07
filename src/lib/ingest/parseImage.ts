@@ -1,4 +1,4 @@
-import { claudeVisionText } from "../claude";
+import { llmVisionText } from "../llm";
 import { structureJobPosting } from "./structureJd";
 import type { JobPosting } from "../types";
 
@@ -28,7 +28,7 @@ export async function ingestFromImage(params: {
   const warnings: string[] = [];
   const base64 = params.buffer.toString("base64");
 
-  const ocr = await claudeVisionText({
+  const ocr = await llmVisionText({
     system:
       "You extract Korean job posting text from screenshots. Return plain text of the posting only. If unreadable, say so.",
     user: "이 이미지에서 채용 공고 텍스트를 모두 추출해 주세요.",

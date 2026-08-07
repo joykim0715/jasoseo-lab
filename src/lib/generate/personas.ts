@@ -1,8 +1,8 @@
-import { claudeJson } from "../claude";
+import { llmJson } from "../llm";
 import type { HiringPersona, JobPosting } from "../types";
 
 export async function buildPersonas(job: JobPosting): Promise<HiringPersona[]> {
-  const parsed = await claudeJson<{
+  const parsed = await llmJson<{
     personas: {
       name: string;
       title: string;

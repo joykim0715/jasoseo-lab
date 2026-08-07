@@ -1,4 +1,4 @@
-import { claudeJson, claudeText } from "../claude";
+import { llmJson, llmText } from "../llm";
 import { countChars, isWithinLimit } from "./charCount";
 import { selectEpisodes } from "./match";
 import { buildPersonas } from "./personas";
@@ -53,7 +53,7 @@ async function draftOne(params: {
       ? `글자 수 제한: ${params.question.charLimit}자 (${params.question.countSpaces ? "공백 포함" : "공백 제외"})`
       : "글자 수 제한 없음";
 
-  const result = await claudeJson<{
+  const result = await llmJson<{
     body: string;
     usedEpisodeIds: string[];
   }>({
@@ -113,7 +113,7 @@ async function compressToLimit(
     return body;
   }
 
-  const compressed = await claudeText({
+  const compressed = await llmText({
     system: "한국어 자소서 문장을 의미 유지하며 압축합니다. 본문만 출력하세요.",
     user: `다음 글을 ${question.charLimit}자 ${question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내로 압축하세요.\n\n${body}`,
     maxTokens: 2000,
@@ -122,7 +122,7 @@ async function compressToLimit(
   let text = compressed.trim();
   // Hard trim fallback if still over
   for (let i = 0; i < 3 && !isWithinLimit(text, question.charLimit, question.countSpaces); i++) {
-    const extra = await claudeText({
+    const extra = await llmText({
       system: "더 짧게. 본문만.",
       user: `목표 ${question.charLimit}자. 현재 ${countChars(text, question.countSpaces)}자.\n\n${text}`,
       maxTokens: 1600,
