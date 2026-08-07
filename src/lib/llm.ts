@@ -78,12 +78,12 @@ function isFallbackWorthy(_err: unknown): boolean {
   return true;
 }
 
-/** LLM 응답에서 JSON 객체/배열 본문만 추출 */
+/** LLM 응답에서 첫 번째 완전한 JSON 값만 추출 (뒤에 설명/두번째 JSON이 붙어 있어도 무시) */
 function extractJsonPayload(text: string): string {
   let cleaned = text.trim();
   cleaned = cleaned
     .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
+    .replace(/\s*```[\s\S]*$/i, "")
     .trim();
 
   const objStart = cleaned.indexOf("{");
@@ -95,10 +95,32 @@ function extractJsonPayload(text: string): string {
 
   if (start === -1) return cleaned;
 
-  const open = cleaned[start];
-  const close = open === "{" ? "}" : "]";
-  const end = cleaned.lastIndexOf(close);
-  if (end > start) return cleaned.slice(start, end + 1);
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return cleaned.slice(start, i + 1);
+    }
+  }
+
+  // 잘린 경우: 시작부터 끝까지 (이후 salvage/closeOpenStructures가 보완)
   return cleaned.slice(start);
 }
 
