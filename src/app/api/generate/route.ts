@@ -21,10 +21,12 @@ const setupSchema = z.object({
   questions: z.array(questionSchema).min(1),
   constraints: z.object({
     freeText: z.string(),
-    requireNumbers: z.boolean(),
-    mentionCompany: z.boolean(),
-    formalTone: z.boolean(),
-    noFabrication: z.boolean(),
+    blindSchool: z.boolean(),
+    blindCompany: z.boolean(),
+    blindProject: z.boolean(),
+    blindGpa: z.boolean(),
+    blindPersonal: z.boolean(),
+    blindDemographics: z.boolean(),
   }),
 });
 

@@ -24,11 +24,37 @@ function newQuestion(partial?: Partial<EssayQuestion>): EssayQuestion {
 
 const defaultConstraints: WritingConstraints = {
   freeText: "",
-  requireNumbers: true,
-  mentionCompany: true,
-  formalTone: true,
-  noFabrication: true,
+  blindSchool: false,
+  blindCompany: false,
+  blindProject: false,
+  blindGpa: false,
+  blindPersonal: false,
+  blindDemographics: false,
 };
+
+function normalizeConstraints(
+  raw: Partial<WritingConstraints> | null | undefined,
+): WritingConstraints {
+  return {
+    ...defaultConstraints,
+    freeText: typeof raw?.freeText === "string" ? raw.freeText : "",
+    blindSchool: Boolean(raw?.blindSchool),
+    blindCompany: Boolean(raw?.blindCompany),
+    blindProject: Boolean(raw?.blindProject),
+    blindGpa: Boolean(raw?.blindGpa),
+    blindPersonal: Boolean(raw?.blindPersonal),
+    blindDemographics: Boolean(raw?.blindDemographics),
+  };
+}
+
+const BLIND_OPTIONS = [
+  ["blindSchool", "학교명 블라인드"],
+  ["blindCompany", "이전 기업명 블라인드"],
+  ["blindProject", "프로젝트명 블라인드"],
+  ["blindGpa", "학점·석차 비노출"],
+  ["blindPersonal", "출신지역·가족관계 비노출"],
+  ["blindDemographics", "나이·성별 암시 금지"],
+] as const;
 
 export function SetupForm() {
   const router = useRouter();
@@ -51,7 +77,7 @@ export function SetupForm() {
     if (existing) {
       setFreeForm(Boolean(existing.freeForm));
       setQuestions(existing.questions);
-      setConstraints(existing.constraints);
+      setConstraints(normalizeConstraints(existing.constraints));
       return;
     }
 
@@ -65,22 +91,14 @@ export function SetupForm() {
   }, [router]);
 
   const ready = useMemo(() => {
-    if (!constraints.freeText.trim() && !hasAnyConstraintFlag(constraints)) {
-      return false;
-    }
     if (freeForm) return true;
     if (!questions.length) return false;
     if (questions.some((q) => !q.title.trim())) return false;
     return true;
-  }, [questions, constraints, freeForm]);
+  }, [questions, freeForm]);
 
   function onContinue() {
     setError(null);
-
-    if (!constraints.freeText.trim() && !hasAnyConstraintFlag(constraints)) {
-      setError("작성 제약 조건(체크 또는 자유 입력)을 설정해 주세요.");
-      return;
-    }
 
     let finalQuestions = questions;
 
@@ -284,8 +302,8 @@ export function SetupForm() {
         </h2>
         <p className="text-sm text-[var(--muted)]">
           {freeForm
-            ? "자유 양식 항목별 기본 글자 수가 적용됩니다. 아래는 전체 작성 톤·규칙입니다."
-            : "글자 수는 문항별로 위에서 설정합니다. 아래는 전체 작성 톤·규칙입니다."}
+            ? "자유 양식 항목별 기본 글자 수가 적용됩니다. 수치·성과, 회사·포지션 언급, 존댓말, 경험 날조 금지는 기본 적용됩니다."
+            : "글자 수는 문항별로 위에서 설정합니다. 수치·성과, 회사·포지션 언급, 존댓말, 경험 날조 금지는 기본 적용됩니다."}
         </p>
         <textarea
           value={constraints.freeText}
@@ -296,15 +314,15 @@ export function SetupForm() {
           placeholder="추가 제약 (예: 팀 협업 강조, 이직 사유 언급 금지…)"
           className="input-field"
         />
+        <p className="text-sm font-medium text-[var(--ink)]">
+          블라인드 채용 대응
+        </p>
+        <p className="text-xs text-[var(--muted)]">
+          체크 시 해당 식별 정보를 일반화·비노출 처리합니다. (지원 회사명은
+          예외)
+        </p>
         <div className="grid gap-2 sm:grid-cols-2">
-          {(
-            [
-              ["requireNumbers", "수치·성과 지표 포함"],
-              ["mentionCompany", "회사·포지션 자연스럽게 언급"],
-              ["formalTone", "존댓말·격식체"],
-              ["noFabrication", "경험 날조 금지"],
-            ] as const
-          ).map(([key, label]) => (
+          {BLIND_OPTIONS.map(([key, label]) => (
             <label
               key={key}
               className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm"
@@ -337,11 +355,5 @@ export function SetupForm() {
         결과 생성 화면으로
       </button>
     </div>
-  );
-}
-
-function hasAnyConstraintFlag(c: WritingConstraints) {
-  return (
-    c.requireNumbers || c.mentionCompany || c.formalTone || c.noFabrication
   );
 }

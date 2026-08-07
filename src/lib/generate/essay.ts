@@ -13,27 +13,58 @@ import type {
   WritingConstraints,
 } from "../types";
 
+/** 톤·품질 규칙은 항상 적용 (UI에서 고정) */
+const BASE_CONSTRAINTS = [
+  "구체적 수치(지표)를 최소 1개 이상 포함",
+  "지원 회사명·포지션을 자연스럽게 언급",
+  "존댓말·격식체 사용",
+  "제공된 경험 외 사실 날조 금지",
+];
+
 function constraintLines(c: WritingConstraints): string[] {
-  const lines: string[] = [];
+  const lines: string[] = [...BASE_CONSTRAINTS];
   if (c.freeText.trim()) lines.push(c.freeText.trim());
-  if (c.requireNumbers) lines.push("구체적 수치(지표)를 최소 1개 이상 포함");
-  if (c.mentionCompany) lines.push("회사명·포지션을 자연스럽게 언급");
-  else lines.push("특정 회사명 과도한 아부성 나열 지양");
-  if (c.formalTone) lines.push("존댓말·격식체 사용");
-  if (c.noFabrication) lines.push("제공된 경험 외 사실 날조 금지");
+  if (c.blindSchool) {
+    lines.push(
+      "블라인드: 구체 학교명 대신 '○○대학교'·'관련 전공 과정' 등으로 일반화. 학력 브랜드로 어필하지 말 것",
+    );
+  }
+  if (c.blindCompany) {
+    lines.push(
+      "블라인드: 이전 근무·인턴 기업명은 '이전 근무처'·'관련 기업' 등으로 일반화. 지원 회사명은 예외로 자연스럽게 언급 가능",
+    );
+  }
+  if (c.blindProject) {
+    lines.push(
+      "블라인드: 사내·특정 프로젝트명은 역할·성과 중심으로 서술하고 고유 프로젝트명은 일반화",
+    );
+  }
+  if (c.blindGpa) {
+    lines.push("블라인드: 학점·석차·수석 등 학력 상세 수치·서열 표현 비노출");
+  }
+  if (c.blindPersonal) {
+    lines.push(
+      "블라인드: 출신지역·거주지·가족관계·집안 배경 등 개인 신상 비노출",
+    );
+  }
+  if (c.blindDemographics) {
+    lines.push(
+      "블라인드: 나이·생년·성별을 암시하는 표현(몇 살, 남/여, ○○년생 등) 금지",
+    );
+  }
   return lines;
 }
 
 function checkConstraints(
   body: string,
-  c: WritingConstraints,
+  _c: WritingConstraints,
   company: string,
 ): string[] {
   const notes: string[] = [];
-  if (c.requireNumbers && !/\d/.test(body)) {
+  if (!/\d/.test(body)) {
     notes.push("수치 포함 권장 조건 미충족");
   }
-  if (c.mentionCompany && company !== "미상" && !body.includes(company)) {
+  if (company !== "미상" && !body.includes(company)) {
     notes.push("회사명 언급 조건 미충족");
   }
   return notes;

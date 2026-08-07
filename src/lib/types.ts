@@ -81,10 +81,18 @@ export type EssayQuestion = {
 
 export type WritingConstraints = {
   freeText: string;
-  requireNumbers: boolean;
-  mentionCompany: boolean;
-  formalTone: boolean;
-  noFabrication: boolean;
+  /** 블라인드 채용: 학교명 비노출·일반화 */
+  blindSchool: boolean;
+  /** 블라인드 채용: 이전 근무 기업명 비노출·일반화 */
+  blindCompany: boolean;
+  /** 블라인드 채용: 사내/특정 프로젝트명 비노출·일반화 */
+  blindProject: boolean;
+  /** 블라인드 채용: 학점·석차 등 학력 상세 비노출 */
+  blindGpa: boolean;
+  /** 블라인드 채용: 출신지역·가족관계 비노출 */
+  blindPersonal: boolean;
+  /** 블라인드 채용: 나이·성별 암시 표현 금지 */
+  blindDemographics: boolean;
 };
 
 export type SetupConfig = {
