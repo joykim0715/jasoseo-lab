@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { generateEssays } from "@/lib/generate/essay";
+import { buildFreeFormQuestionsServer } from "@/lib/generate/freeForm";
 import { loadCandidateProfile } from "@/lib/profile/loadProfile";
 import type { JobPosting, SetupConfig } from "@/lib/types";
 
@@ -16,6 +17,7 @@ const questionSchema = z.object({
 });
 
 const setupSchema = z.object({
+  freeForm: z.boolean().optional().default(false),
   questions: z.array(questionSchema).min(1),
   constraints: z.object({
     freeText: z.string(),
@@ -43,15 +45,22 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const job = jobSchema.parse(body.job) as JobPosting;
-    const setup = setupSchema.parse(body.setup) as SetupConfig;
+    let setup = setupSchema.parse(body.setup) as SetupConfig;
 
-    // Gate: required fields already enforced by schema (questions min 1)
-    for (const q of setup.questions) {
-      if (!q.title.trim()) {
-        return NextResponse.json(
-          { error: "모든 문항의 제목이 필요합니다." },
-          { status: 400 },
-        );
+    if (setup.freeForm) {
+      setup = {
+        ...setup,
+        freeForm: true,
+        questions: buildFreeFormQuestionsServer(),
+      };
+    } else {
+      for (const q of setup.questions) {
+        if (!q.title.trim()) {
+          return NextResponse.json(
+            { error: "모든 문항의 제목이 필요합니다." },
+            { status: 400 },
+          );
+        }
       }
     }
 
@@ -61,11 +70,15 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json(
-        { error: "문항 구성·글자 수·제약 조건을 모두 입력해 주세요.", details: err.issues },
+        {
+          error: "문항 구성·글자 수·제약 조건을 모두 입력해 주세요.",
+          details: err.issues,
+        },
         { status: 400 },
       );
     }
-    const message = err instanceof Error ? err.message : "자소서 생성에 실패했습니다.";
+    const message =
+      err instanceof Error ? err.message : "자소서 생성에 실패했습니다.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

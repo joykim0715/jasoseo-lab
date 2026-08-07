@@ -88,6 +88,8 @@ export type WritingConstraints = {
 };
 
 export type SetupConfig = {
+  /** true면 국내 기업 표준 자소서 항목으로 생성 (수동 문항 무시) */
+  freeForm: boolean;
   questions: EssayQuestion[];
   constraints: WritingConstraints;
 };

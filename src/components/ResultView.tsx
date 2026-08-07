@@ -110,6 +110,7 @@ export function ResultView() {
           </h1>
           <p className="mt-2 text-[var(--muted)]">
             {job.company} · {job.role}
+            {setup.freeForm ? " · 자유 양식(표준 5항목)" : ""}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

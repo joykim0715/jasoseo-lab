@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { JobSummary } from "./JobSummary";
+import { buildFreeFormQuestions } from "@/lib/generate/freeForm";
 import { loadJob, loadSetup, saveSetup } from "@/lib/session";
 import type {
   EssayQuestion,
@@ -32,6 +33,7 @@ const defaultConstraints: WritingConstraints = {
 export function SetupForm() {
   const router = useRouter();
   const [job, setJob] = useState<JobPosting | null>(null);
+  const [freeForm, setFreeForm] = useState(false);
   const [questions, setQuestions] = useState<EssayQuestion[]>([newQuestion()]);
   const [constraints, setConstraints] =
     useState<WritingConstraints>(defaultConstraints);
@@ -47,6 +49,7 @@ export function SetupForm() {
 
     const existing = loadSetup();
     if (existing) {
+      setFreeForm(Boolean(existing.freeForm));
       setQuestions(existing.questions);
       setConstraints(existing.constraints);
       return;
@@ -62,30 +65,43 @@ export function SetupForm() {
   }, [router]);
 
   const ready = useMemo(() => {
-    if (!questions.length) return false;
-    if (questions.some((q) => !q.title.trim())) return false;
     if (!constraints.freeText.trim() && !hasAnyConstraintFlag(constraints)) {
       return false;
     }
+    if (freeForm) return true;
+    if (!questions.length) return false;
+    if (questions.some((q) => !q.title.trim())) return false;
     return true;
-  }, [questions, constraints]);
+  }, [questions, constraints, freeForm]);
 
   function onContinue() {
     setError(null);
-    if (!questions.length || questions.some((q) => !q.title.trim())) {
-      setError("자소서 문항 구성을 입력해 주세요.");
-      return;
-    }
-    if (questions.some((q) => q.charLimit < 0)) {
-      setError("글자 수 제한을 확인해 주세요.");
-      return;
-    }
+
     if (!constraints.freeText.trim() && !hasAnyConstraintFlag(constraints)) {
       setError("작성 제약 조건(체크 또는 자유 입력)을 설정해 주세요.");
       return;
     }
 
-    const setup: SetupConfig = { questions, constraints };
+    let finalQuestions = questions;
+
+    if (freeForm) {
+      finalQuestions = buildFreeFormQuestions();
+    } else {
+      if (!questions.length || questions.some((q) => !q.title.trim())) {
+        setError("자소서 문항 구성을 입력해 주세요.");
+        return;
+      }
+      if (questions.some((q) => q.charLimit < 0)) {
+        setError("글자 수 제한을 확인해 주세요.");
+        return;
+      }
+    }
+
+    const setup: SetupConfig = {
+      freeForm,
+      questions: finalQuestions,
+      constraints,
+    };
     saveSetup(setup);
     router.push("/result");
   }
@@ -114,20 +130,60 @@ export function SetupForm() {
         <JobSummary job={job} />
       </div>
 
-      <section className="animate-rise-delay-2 panel space-y-4 p-5 sm:p-6">
+      <section className="animate-rise-delay-2 panel space-y-3 p-5 sm:p-6">
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            className="mt-1 h-4 w-4"
+            checked={freeForm}
+            onChange={(e) => setFreeForm(e.target.checked)}
+          />
+          <span>
+            <span className="block text-lg font-medium text-[var(--ink)]">
+              자유 양식으로 생성
+            </span>
+            <span className="mt-1 block text-sm text-[var(--muted)]">
+              국내 기업에서 흔한 표준 자소서 항목(성장과정 · 성격 장단점 ·
+              지원동기 · 직무역량/경험 · 입사 후 포부)으로 자동 구성합니다.
+              체크 시 아래 수동 문항 구성은 비활성화됩니다.
+            </span>
+          </span>
+        </label>
+        {freeForm && (
+          <ul className="ml-7 list-disc space-y-1 text-sm text-[var(--muted)]">
+            <li>성장과정 (800자)</li>
+            <li>성격의 장단점 (700자)</li>
+            <li>지원동기 (800자)</li>
+            <li>직무역량 및 경험 (1000자)</li>
+            <li>입사 후 포부 (700자)</li>
+          </ul>
+        )}
+      </section>
+
+      <section
+        className={`panel space-y-4 p-5 sm:p-6 transition ${
+          freeForm
+            ? "pointer-events-none select-none opacity-45 grayscale"
+            : ""
+        }`}
+        aria-disabled={freeForm}
+      >
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-medium text-[var(--ink)]">
               1. 자소서 문항 구성
             </h2>
             <p className="text-sm text-[var(--muted)]">
-              JD에서 문항이 보이면 초안으로 채워집니다.
+              {freeForm
+                ? "자유 양식 사용 중 — 수동 문항은 적용되지 않습니다."
+                : "JD에서 문항이 보이면 초안으로 채워집니다."}
             </p>
           </div>
           <button
             type="button"
+            disabled={freeForm}
             onClick={() => setQuestions((q) => [...q, newQuestion()])}
-            className="btn-ghost"
+            className="btn-ghost disabled:opacity-40"
           >
             + 문항
           </button>
@@ -140,7 +196,7 @@ export function SetupForm() {
           >
             <div className="flex items-center justify-between">
               <p className="text-sm text-[var(--muted)]">문항 {idx + 1}</p>
-              {questions.length > 1 && (
+              {questions.length > 1 && !freeForm && (
                 <button
                   type="button"
                   className="text-xs text-[var(--danger)]"
@@ -154,6 +210,7 @@ export function SetupForm() {
             </div>
             <input
               value={q.title}
+              disabled={freeForm}
               onChange={(e) =>
                 setQuestions((all) =>
                   all.map((x) =>
@@ -162,10 +219,11 @@ export function SetupForm() {
                 )
               }
               placeholder="문항 제목 (예: 지원 동기)"
-              className="input-field"
+              className="input-field disabled:bg-[var(--line)]/20"
             />
             <textarea
               value={q.prompt}
+              disabled={freeForm}
               onChange={(e) =>
                 setQuestions((all) =>
                   all.map((x) =>
@@ -175,7 +233,7 @@ export function SetupForm() {
               }
               rows={2}
               placeholder="문항 상세 프롬프트 (선택)"
-              className="input-field"
+              className="input-field disabled:bg-[var(--line)]/20"
             />
             <div className="flex flex-wrap items-center gap-3 text-sm">
               <label className="flex items-center gap-2 text-[var(--muted)]">
@@ -183,6 +241,7 @@ export function SetupForm() {
                 <input
                   type="number"
                   min={0}
+                  disabled={freeForm}
                   value={q.charLimit}
                   onChange={(e) =>
                     setQuestions((all) =>
@@ -193,12 +252,13 @@ export function SetupForm() {
                       ),
                     )
                   }
-                  className="input-field w-24 py-1.5"
+                  className="input-field w-24 py-1.5 disabled:bg-[var(--line)]/20"
                 />
               </label>
               <label className="flex items-center gap-2 text-[var(--muted)]">
                 <input
                   type="checkbox"
+                  disabled={freeForm}
                   checked={q.countSpaces}
                   onChange={(e) =>
                     setQuestions((all) =>
@@ -223,7 +283,9 @@ export function SetupForm() {
           2–3. 작성 제약 조건
         </h2>
         <p className="text-sm text-[var(--muted)]">
-          글자 수는 문항별로 위에서 설정합니다. 아래는 전체 작성 톤·규칙입니다.
+          {freeForm
+            ? "자유 양식 항목별 기본 글자 수가 적용됩니다. 아래는 전체 작성 톤·규칙입니다."
+            : "글자 수는 문항별로 위에서 설정합니다. 아래는 전체 작성 톤·규칙입니다."}
         </p>
         <textarea
           value={constraints.freeText}

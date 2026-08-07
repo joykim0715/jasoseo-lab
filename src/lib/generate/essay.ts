@@ -47,11 +47,16 @@ async function draftOne(params: {
   episodesSummary: string;
   essaySamples: string;
   constraints: WritingConstraints;
+  freeForm: boolean;
 }): Promise<{ body: string; usedEpisodeIds: string[] }> {
   const limitNote =
     params.question.charLimit > 0
       ? `글자 수 제한: ${params.question.charLimit}자 (${params.question.countSpaces ? "공백 포함" : "공백 제외"})`
       : "글자 수 제한 없음";
+
+  const freeFormHint = params.freeForm
+    ? "\n국내 기업 표준 자소서 항목(성장과정·성격 장단점·지원동기·직무역량/경험·입사 후 포부) 관행에 맞게, 해당 항목의 평가 목적에 충실한 구조로 작성하세요."
+    : "";
 
   const result = await llmJson<{
     body: string;
@@ -60,8 +65,9 @@ async function draftOne(params: {
     system: `당신은 한국어 자기소개서 전문 라이터입니다.
 지원자 실제 경험만 사용해 문항별 답변을 작성합니다.
 채용 담당 페르소나들의 심사 포인트를 반영하되, 과도한 미사여구는 피합니다.
-본문은 복사해 바로 붙여넣을 수 있는 완성된 문장으로만 작성합니다.`,
+본문은 복사해 바로 붙여넣을 수 있는 완성된 문장으로만 작성합니다.${freeFormHint}`,
     user: JSON.stringify({
+      mode: params.freeForm ? "freeFormStandardKR" : "customQuestions",
       candidate: {
         name: params.profile.name,
         tagline: params.profile.tagline,
@@ -200,6 +206,7 @@ export async function generateEssays(params: {
       episodesSummary,
       essaySamples,
       constraints: params.setup.constraints,
+      freeForm: Boolean(params.setup.freeForm),
     });
     const body = await compressToLimit(draft.body, question);
     const charCount = countChars(body, question.countSpaces);
