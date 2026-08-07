@@ -1,22 +1,33 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import {
+  GoogleGenerativeAI,
+  SchemaType,
+  type ResponseSchema,
+} from "@google/generative-ai";
 
 const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5-20250929";
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 
 let anthropic: Anthropic | null = null;
 let gemini: GoogleGenerativeAI | null = null;
 
+/** 크레딧 부족이 확인되면 이후 Claude 호출을 건너뜀 (서버 프로세스 단위) */
+let claudeBillingExhausted = false;
+
 export function llmStatus() {
   return {
-    claudeConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
+    claudeConfigured: Boolean(process.env.ANTHROPIC_API_KEY) && !claudeBillingExhausted,
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-    primary: "claude" as const,
+    primary: claudeBillingExhausted ? ("gemini" as const) : ("claude" as const),
     fallback: "gemini" as const,
   };
 }
 
+export { SchemaType };
+export type { ResponseSchema };
+
 function getAnthropic() {
+  if (claudeBillingExhausted) return null;
   if (!process.env.ANTHROPIC_API_KEY) return null;
   if (!anthropic) {
     anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -33,15 +44,27 @@ function getGemini() {
 }
 
 function assertAnyProvider() {
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.GEMINI_API_KEY) {
+  if (!getAnthropic() && !getGemini()) {
+    if (claudeBillingExhausted && !process.env.GEMINI_API_KEY) {
+      throw new Error(
+        "Claude 크레딧이 부족하고 GEMINI_API_KEY도 없습니다. Anthropic 결제 충전 또는 Gemini 키를 설정해 주세요.",
+      );
+    }
     throw new Error(
       "ANTHROPIC_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다.",
     );
   }
 }
 
+function markClaudeBillingIfNeeded(err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/credit balance is too low|billing|quota|insufficient/i.test(msg)) {
+    claudeBillingExhausted = true;
+    console.warn("[llm] Claude billing exhausted — skipping Claude for this process");
+  }
+}
+
 function isFallbackWorthy(_err: unknown): boolean {
-  // Provider/API 오류뿐 아니라 JSON 파싱 실패도 다른 모델로 재시도
   return true;
 }
 
@@ -69,14 +92,90 @@ function extractJsonPayload(text: string): string {
   return cleaned.slice(start);
 }
 
-function parseLlmJson<T>(text: string): T {
-  const payload = extractJsonPayload(text);
-  try {
-    return JSON.parse(payload) as T;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : "unknown";
-    throw new Error(`LLM JSON 파싱 실패: ${detail}`);
+/** 흔한 JSON 깨짐을 로컬에서 복구 시도 */
+function salvageJsonPayload(raw: string): string[] {
+  const base = extractJsonPayload(raw);
+  const variants = new Set<string>([base]);
+
+  // 스마트 따옴표 → 일반 따옴표
+  variants.add(
+    base.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'"),
+  );
+
+  // trailing commas
+  for (const v of [...variants]) {
+    variants.add(v.replace(/,\s*([}\]])/g, "$1"));
   }
+
+  // 잘린 JSON: 열린 괄호 닫기
+  for (const v of [...variants]) {
+    variants.add(closeOpenStructures(v));
+  }
+
+  return [...variants];
+}
+
+function closeOpenStructures(input: string): string {
+  let s = input.trimEnd();
+  // 미완성 문자열이면 닫기
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+  }
+  if (inString) s += '"';
+
+  // 값 도중 잘린 키/콜론 뒤 잔여 제거는 보수적으로 스킵
+  const stack: string[] = [];
+  inString = false;
+  escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  while (stack.length) {
+    const open = stack.pop();
+    s += open === "{" ? "}" : "]";
+  }
+  return s.replace(/,\s*([}\]])/g, "$1");
+}
+
+function parseLlmJson<T>(text: string): T {
+  const attempts = salvageJsonPayload(text);
+  let lastErr: Error | null = null;
+  for (const payload of attempts) {
+    try {
+      return JSON.parse(payload) as T;
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+  throw new Error(
+    `LLM JSON 파싱 실패: ${lastErr?.message ?? "unknown"}`,
+  );
 }
 
 async function withProviderFallback<T>(
@@ -92,6 +191,7 @@ async function withProviderFallback<T>(
     try {
       return await runClaude();
     } catch (err) {
+      markClaudeBillingIfNeeded(err);
       if (hasGemini && isFallbackWorthy(err)) {
         console.warn(`[llm] Claude ${label} failed → Gemini fallback:`, err);
         try {
@@ -116,14 +216,16 @@ function formatProviderError(claudeErr?: unknown, geminiErr?: unknown): string {
   const claudeMsg = claudeErr instanceof Error ? claudeErr.message : "";
   const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "";
 
-  if (/credit balance is too low|billing|quota/i.test(claudeMsg)) {
-    parts.push("Claude 크레딧/결제 잔액이 부족합니다.");
+  if (/credit balance is too low|billing|quota|insufficient/i.test(claudeMsg)) {
+    parts.push(
+      "Claude 크레딧/결제 잔액이 부족합니다. console.anthropic.com 에서 충전하거나 GEMINI만으로 계속 사용할 수 있습니다.",
+    );
   } else if (claudeMsg) {
     parts.push(`Claude: ${claudeMsg.slice(0, 180)}`);
   }
 
   if (/no longer available|not found|404/i.test(geminiMsg)) {
-    parts.push("Gemini 모델명을 확인해 주세요 (기본: gemini-3.5-flash).");
+    parts.push("Gemini 모델명을 확인해 주세요 (기본: gemini-2.5-flash).");
   } else if (/API_KEY|api key|403|401/i.test(geminiMsg)) {
     parts.push("Gemini API 키가 유효하지 않습니다.");
   } else if (geminiMsg) {
@@ -140,14 +242,19 @@ async function runClaudeText(params: {
 }): Promise<string> {
   const client = getAnthropic();
   if (!client) throw new Error("ANTHROPIC_API_KEY 없음");
-  const res = await client.messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: params.maxTokens ?? 4096,
-    system: params.system,
-    messages: [{ role: "user", content: params.user }],
-  });
-  const block = res.content.find((c) => c.type === "text");
-  return block && block.type === "text" ? block.text : "";
+  try {
+    const res = await client.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: params.maxTokens ?? 4096,
+      system: params.system,
+      messages: [{ role: "user", content: params.user }],
+    });
+    const block = res.content.find((c) => c.type === "text");
+    return block && block.type === "text" ? block.text : "";
+  } catch (err) {
+    markClaudeBillingIfNeeded(err);
+    throw err;
+  }
 }
 
 async function runGeminiText(params: {
@@ -155,6 +262,7 @@ async function runGeminiText(params: {
   user: string;
   maxTokens?: number;
   jsonMode?: boolean;
+  responseSchema?: ResponseSchema;
 }): Promise<string> {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
@@ -163,8 +271,13 @@ async function runGeminiText(params: {
     systemInstruction: params.system,
     generationConfig: {
       maxOutputTokens: params.maxTokens ?? 4096,
-      ...(params.jsonMode
-        ? { responseMimeType: "application/json" as const }
+      ...(params.jsonMode || params.responseSchema
+        ? {
+            responseMimeType: "application/json" as const,
+            ...(params.responseSchema
+              ? { responseSchema: params.responseSchema }
+              : {}),
+          }
         : {}),
     },
   });
@@ -188,16 +301,25 @@ async function repairJsonText(
   broken: string,
   maxTokens?: number,
   preferGemini?: boolean,
+  responseSchema?: ResponseSchema,
 ): Promise<string> {
   const system =
     "You repair malformed JSON. Output valid JSON only. No markdown fences, no commentary.";
   const user = `Fix this into valid JSON:\n\n${broken.slice(0, 12000)}`;
   const run = async (useGemini: boolean) =>
     useGemini
-      ? runGeminiText({ system, user, maxTokens: maxTokens ?? 4096, jsonMode: true })
+      ? runGeminiText({
+          system,
+          user,
+          maxTokens: maxTokens ?? 4096,
+          jsonMode: true,
+          responseSchema,
+        })
       : runClaudeText({ system, user, maxTokens: maxTokens ?? 4096 });
 
-  if (preferGemini && getGemini()) {
+  const tryGeminiFirst = preferGemini || claudeBillingExhausted || !getAnthropic();
+
+  if (tryGeminiFirst && getGemini()) {
     try {
       return await run(true);
     } catch {
@@ -208,7 +330,8 @@ async function repairJsonText(
   if (getAnthropic()) {
     try {
       return await run(false);
-    } catch {
+    } catch (err) {
+      markClaudeBillingIfNeeded(err);
       if (getGemini()) return run(true);
       throw new Error("JSON 복구 실패");
     }
@@ -221,6 +344,7 @@ async function completeJson<T>(params: {
   user: string;
   maxTokens?: number;
   useGemini: boolean;
+  responseSchema?: ResponseSchema;
 }): Promise<T> {
   const system = `${params.system}\n\nRespond with valid JSON only. No markdown fences.`;
   const text = params.useGemini
@@ -229,6 +353,7 @@ async function completeJson<T>(params: {
         user: params.user,
         maxTokens: params.maxTokens,
         jsonMode: true,
+        responseSchema: params.responseSchema,
       })
     : await runClaudeText({
         system,
@@ -243,7 +368,8 @@ async function completeJson<T>(params: {
     const repaired = await repairJsonText(
       text,
       params.maxTokens,
-      params.useGemini,
+      params.useGemini || claudeBillingExhausted,
+      params.responseSchema,
     );
     return parseLlmJson<T>(repaired);
   }
@@ -253,6 +379,8 @@ export async function llmJson<T>(params: {
   system: string;
   user: string;
   maxTokens?: number;
+  /** Gemini structured output schema (권장) */
+  responseSchema?: ResponseSchema;
 }): Promise<T> {
   return withProviderFallback(
     "json",
@@ -262,6 +390,7 @@ export async function llmJson<T>(params: {
         user: params.user,
         maxTokens: params.maxTokens,
         useGemini: false,
+        responseSchema: params.responseSchema,
       }),
     () =>
       completeJson<T>({
@@ -269,6 +398,7 @@ export async function llmJson<T>(params: {
         user: params.user,
         maxTokens: params.maxTokens,
         useGemini: true,
+        responseSchema: params.responseSchema,
       }),
   );
 }
@@ -284,29 +414,34 @@ async function runClaudeVision(params: {
 }): Promise<string> {
   const client = getAnthropic();
   if (!client) throw new Error("ANTHROPIC_API_KEY 없음");
-  const res = await client.messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: params.maxTokens ?? 4096,
-    system: params.system,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: params.mediaType,
-              data: params.base64,
+  try {
+    const res = await client.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: params.maxTokens ?? 4096,
+      system: params.system,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: params.mediaType,
+                data: params.base64,
+              },
             },
-          },
-          { type: "text", text: params.user },
-        ],
-      },
-    ],
-  });
-  const block = res.content.find((c) => c.type === "text");
-  return block && block.type === "text" ? block.text : "";
+            { type: "text", text: params.user },
+          ],
+        },
+      ],
+    });
+    const block = res.content.find((c) => c.type === "text");
+    return block && block.type === "text" ? block.text : "";
+  } catch (err) {
+    markClaudeBillingIfNeeded(err);
+    throw err;
+  }
 }
 
 async function runGeminiVision(params: {

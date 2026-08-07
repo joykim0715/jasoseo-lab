@@ -1,4 +1,4 @@
-import { llmJson, llmText } from "../llm";
+import { llmJson, llmText, SchemaType, type ResponseSchema } from "../llm";
 import { countChars, isWithinLimit } from "./charCount";
 import { selectEpisodes } from "./match";
 import { buildPersonas } from "./personas";
@@ -96,7 +96,19 @@ async function draftOne(params: {
     system: `당신은 한국어 자기소개서 전문 라이터입니다.
 지원자 실제 경험만 사용해 문항별 답변을 작성합니다.
 채용 담당 페르소나들의 심사 포인트를 반영하되, 과도한 미사여구는 피합니다.
-본문은 복사해 바로 붙여넣을 수 있는 완성된 문장으로만 작성합니다.${freeFormHint}`,
+본문은 복사해 바로 붙여넣을 수 있는 완성된 문장으로만 작성합니다.
+JSON의 body 문자열 안에서는 줄바꿈 대신 공백으로 이어서 쓰고, 따옴표는 피하세요.${freeFormHint}`,
+    responseSchema: {
+      type: SchemaType.OBJECT,
+      properties: {
+        body: { type: SchemaType.STRING },
+        usedEpisodeIds: {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+        },
+      },
+      required: ["body", "usedEpisodeIds"],
+    } as ResponseSchema,
     user: JSON.stringify({
       mode: params.freeForm ? "freeFormStandardKR" : "customQuestions",
       candidate: {
