@@ -3,19 +3,49 @@ import { assertSafePublicUrl } from "./ssrf";
 import { structureJobPosting } from "./structureJd";
 import type { JobPosting } from "../types";
 
+function cleanText(t: string): string {
+  return t.replace(/\s+/g, " ").trim();
+}
+
 function extractMainText(html: string): string {
   const $ = cheerio.load(html);
-  $("script, style, noscript, nav, footer, header, iframe").remove();
+
+  // 제목은 header/nav에 있는 경우가 많아 제거 전에 확보
+  const pageTitle = cleanText($("title").first().text());
+  const ogTitle = cleanText(
+    $('meta[property="og:title"]').attr("content") ||
+      $('meta[name="og:title"]').attr("content") ||
+      "",
+  );
+  const ogDescription = cleanText(
+    $('meta[property="og:description"]').attr("content") ||
+      $('meta[name="description"]').attr("content") ||
+      "",
+  );
+  const h1 = cleanText($("h1").first().text());
+
+  $("script, style, noscript, nav, footer, iframe").remove();
+  // header는 메뉴만 있는 경우가 많아 제거하되, h1은 위에서 이미 확보
+
   const candidates = [
     $("main").text(),
     $("article").text(),
-    $("[class*='job'], [class*='recruit'], [id*='job'], [id*='recruit']").text(),
+    $("[class*='job'], [class*='recruit'], [class*='Job'], [id*='job'], [id*='recruit']").text(),
     $("body").text(),
   ];
-  const best = candidates
-    .map((t) => t.replace(/\s+/g, " ").trim())
-    .sort((a, b) => b.length - a.length)[0];
-  return best || "";
+  const body = candidates
+    .map((t) => cleanText(t))
+    .sort((a, b) => b.length - a.length)[0] || "";
+
+  const metaLines = [
+    pageTitle && `페이지 제목: ${pageTitle}`,
+    ogTitle && ogTitle !== pageTitle && `OG 제목: ${ogTitle}`,
+    h1 && `공고 제목(H1): ${h1}`,
+    ogDescription && `요약: ${ogDescription}`,
+  ].filter(Boolean);
+
+  if (!metaLines.length) return body;
+  return `${metaLines.join("\n")}\n\n${body}`;
 }
 
 export async function ingestFromUrl(urlString: string): Promise<JobPosting> {
@@ -27,7 +57,7 @@ export async function ingestFromUrl(urlString: string): Promise<JobPosting> {
     res = await fetch(url.toString(), {
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (compatible; JasoseoBot/1.0; +personal-cover-letter-tool)",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         Accept: "text/html,application/xhtml+xml",
       },
       redirect: "follow",
