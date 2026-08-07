@@ -1,11 +1,11 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import {
   GoogleGenerativeAI,
   SchemaType,
   type ResponseSchema,
 } from "@google/generative-ai";
 
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5-20250929";
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 /** 환경변수 우선, 없으면 최신 → 안정 순으로 폴백 */
 const GEMINI_MODEL_CANDIDATES = [
@@ -18,17 +18,24 @@ const GEMINI_MODEL_CANDIDATES = [
 
 let resolvedGeminiModel: string | null = null;
 
-let anthropic: Anthropic | null = null;
+let openai: OpenAI | null = null;
 let gemini: GoogleGenerativeAI | null = null;
 
-/** 크레딧 부족이 확인되면 이후 Claude 호출을 건너뜀 (서버 프로세스 단위) */
-let claudeBillingExhausted = false;
+/** OpenAI 결제/쿼터 이슈 시 이후 GPT 호출 스킵 */
+let openaiBillingExhausted = false;
 
 export function llmStatus() {
   return {
-    claudeConfigured: Boolean(process.env.ANTHROPIC_API_KEY) && !claudeBillingExhausted,
+    openaiConfigured:
+      Boolean(process.env.OPENAI_API_KEY) && !openaiBillingExhausted,
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-    primary: claudeBillingExhausted ? ("gemini" as const) : ("claude" as const),
+    /** @deprecated Claude 제거 — 하위 호환용 */
+    claudeConfigured: false,
+    primary: openaiBillingExhausted
+      ? ("gemini" as const)
+      : process.env.OPENAI_API_KEY
+        ? ("openai" as const)
+        : ("gemini" as const),
     fallback: "gemini" as const,
   };
 }
@@ -36,13 +43,13 @@ export function llmStatus() {
 export { SchemaType };
 export type { ResponseSchema };
 
-function getAnthropic() {
-  if (claudeBillingExhausted) return null;
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!anthropic) {
-    anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+function getOpenAI() {
+  if (openaiBillingExhausted) return null;
+  if (!process.env.OPENAI_API_KEY) return null;
+  if (!openai) {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
-  return anthropic;
+  return openai;
 }
 
 function getGemini() {
@@ -54,31 +61,31 @@ function getGemini() {
 }
 
 function assertAnyProvider() {
-  if (!getAnthropic() && !getGemini()) {
-    if (claudeBillingExhausted && !process.env.GEMINI_API_KEY) {
-      throw new Error(
-        "Claude 크레딧이 부족하고 GEMINI_API_KEY도 없습니다. Anthropic 결제 충전 또는 Gemini 키를 설정해 주세요.",
-      );
-    }
+  if (!getOpenAI() && !getGemini()) {
     throw new Error(
-      "ANTHROPIC_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다.",
+      "OPENAI_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다.",
     );
   }
 }
 
-function markClaudeBillingIfNeeded(err: unknown) {
+function markOpenAIBillingIfNeeded(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/credit balance is too low|billing|quota|insufficient/i.test(msg)) {
-    claudeBillingExhausted = true;
-    console.warn("[llm] Claude billing exhausted — skipping Claude for this process");
+  if (
+    /insufficient_quota|billing|quota|credit|payment|rate_limit_exceeded/i.test(
+      msg,
+    )
+  ) {
+    // rate limit은 일시적일 수 있어 billing/quota만 영구 스킵
+    if (/insufficient_quota|billing|credit|payment/i.test(msg)) {
+      openaiBillingExhausted = true;
+      console.warn(
+        "[llm] OpenAI billing/quota exhausted — skipping OpenAI for this process",
+      );
+    }
   }
 }
 
-function isFallbackWorthy(_err: unknown): boolean {
-  return true;
-}
-
-/** LLM 응답에서 첫 번째 완전한 JSON 값만 추출 (뒤에 설명/두번째 JSON이 붙어 있어도 무시) */
+/** LLM 응답에서 첫 번째 완전한 JSON 값만 추출 */
 function extractJsonPayload(text: string): string {
   let cleaned = text.trim();
   cleaned = cleaned
@@ -120,26 +127,21 @@ function extractJsonPayload(text: string): string {
     }
   }
 
-  // 잘린 경우: 시작부터 끝까지 (이후 salvage/closeOpenStructures가 보완)
   return cleaned.slice(start);
 }
 
-/** 흔한 JSON 깨짐을 로컬에서 복구 시도 */
 function salvageJsonPayload(raw: string): string[] {
   const base = extractJsonPayload(raw);
   const variants = new Set<string>([base]);
 
-  // 스마트 따옴표 → 일반 따옴표
   variants.add(
     base.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'"),
   );
 
-  // trailing commas
   for (const v of [...variants]) {
     variants.add(v.replace(/,\s*([}\]])/g, "$1"));
   }
 
-  // 잘린 JSON: 열린 괄호 닫기
   for (const v of [...variants]) {
     variants.add(closeOpenStructures(v));
   }
@@ -149,7 +151,6 @@ function salvageJsonPayload(raw: string): string[] {
 
 function closeOpenStructures(input: string): string {
   let s = input.trimEnd();
-  // 미완성 문자열이면 닫기
   let inString = false;
   let escape = false;
   for (let i = 0; i < s.length; i++) {
@@ -166,7 +167,6 @@ function closeOpenStructures(input: string): string {
   }
   if (inString) s += '"';
 
-  // 값 도중 잘린 키/콜론 뒤 잔여 제거는 보수적으로 스킵
   const stack: string[] = [];
   inString = false;
   escape = false;
@@ -205,27 +205,25 @@ function parseLlmJson<T>(text: string): T {
       lastErr = err instanceof Error ? err : new Error(String(err));
     }
   }
-  throw new Error(
-    `LLM JSON 파싱 실패: ${lastErr?.message ?? "unknown"}`,
-  );
+  throw new Error(`LLM JSON 파싱 실패: ${lastErr?.message ?? "unknown"}`);
 }
 
 async function withProviderFallback<T>(
   label: string,
-  runClaude: () => Promise<T>,
+  runOpenAI: () => Promise<T>,
   runGemini: () => Promise<T>,
 ): Promise<T> {
   assertAnyProvider();
-  const hasClaude = Boolean(getAnthropic());
+  const hasOpenAI = Boolean(getOpenAI());
   const hasGemini = Boolean(getGemini());
 
-  if (hasClaude) {
+  if (hasOpenAI) {
     try {
-      return await runClaude();
+      return await runOpenAI();
     } catch (err) {
-      markClaudeBillingIfNeeded(err);
-      if (hasGemini && isFallbackWorthy(err)) {
-        console.warn(`[llm] Claude ${label} failed → Gemini fallback:`, err);
+      markOpenAIBillingIfNeeded(err);
+      if (hasGemini) {
+        console.warn(`[llm] OpenAI ${label} failed → Gemini fallback:`, err);
         try {
           return await runGemini();
         } catch (geminiErr) {
@@ -243,17 +241,19 @@ async function withProviderFallback<T>(
   }
 }
 
-function formatProviderError(claudeErr?: unknown, geminiErr?: unknown): string {
+function formatProviderError(openaiErr?: unknown, geminiErr?: unknown): string {
   const parts: string[] = [];
-  const claudeMsg = claudeErr instanceof Error ? claudeErr.message : "";
+  const openaiMsg = openaiErr instanceof Error ? openaiErr.message : "";
   const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "";
 
-  if (/credit balance is too low|billing|quota|insufficient/i.test(claudeMsg)) {
+  if (/insufficient_quota|billing|credit|payment/i.test(openaiMsg)) {
     parts.push(
-      "Claude 크레딧/결제 잔액이 부족합니다. console.anthropic.com 에서 충전하거나 GEMINI만으로 계속 사용할 수 있습니다.",
+      "OpenAI 크레딧/결제 잔액이 부족합니다. platform.openai.com 에서 충전하거나 GEMINI만으로 계속 사용할 수 있습니다.",
     );
-  } else if (claudeMsg) {
-    parts.push(`Claude: ${claudeMsg.slice(0, 180)}`);
+  } else if (/incorrect api key|invalid_api_key|401/i.test(openaiMsg)) {
+    parts.push("OpenAI API 키가 유효하지 않습니다.");
+  } else if (openaiMsg) {
+    parts.push(`OpenAI: ${openaiMsg.slice(0, 180)}`);
   }
 
   if (/API_KEY|api key|403|401|invalid.*key/i.test(geminiMsg)) {
@@ -269,24 +269,29 @@ function formatProviderError(claudeErr?: unknown, geminiErr?: unknown): string {
   return parts.join(" / ") || "LLM 호출에 실패했습니다.";
 }
 
-async function runClaudeText(params: {
+async function runOpenAIText(params: {
   system: string;
   user: string;
   maxTokens?: number;
+  jsonMode?: boolean;
 }): Promise<string> {
-  const client = getAnthropic();
-  if (!client) throw new Error("ANTHROPIC_API_KEY 없음");
+  const client = getOpenAI();
+  if (!client) throw new Error("OPENAI_API_KEY 없음");
   try {
-    const res = await client.messages.create({
-      model: CLAUDE_MODEL,
+    const res = await client.chat.completions.create({
+      model: OPENAI_MODEL,
       max_tokens: params.maxTokens ?? 4096,
-      system: params.system,
-      messages: [{ role: "user", content: params.user }],
+      ...(params.jsonMode
+        ? { response_format: { type: "json_object" as const } }
+        : {}),
+      messages: [
+        { role: "system", content: params.system },
+        { role: "user", content: params.user },
+      ],
     });
-    const block = res.content.find((c) => c.type === "text");
-    return block && block.type === "text" ? block.text : "";
+    return res.choices[0]?.message?.content?.trim() ?? "";
   } catch (err) {
-    markClaudeBillingIfNeeded(err);
+    markOpenAIBillingIfNeeded(err);
     throw err;
   }
 }
@@ -358,7 +363,7 @@ export async function llmText(params: {
 }): Promise<string> {
   return withProviderFallback(
     "text",
-    () => runClaudeText(params),
+    () => runOpenAIText(params),
     () => runGeminiText(params),
   );
 }
@@ -381,23 +386,29 @@ async function repairJsonText(
           jsonMode: true,
           responseSchema,
         })
-      : runClaudeText({ system, user, maxTokens: maxTokens ?? 4096 });
+      : runOpenAIText({
+          system,
+          user,
+          maxTokens: maxTokens ?? 4096,
+          jsonMode: true,
+        });
 
-  const tryGeminiFirst = preferGemini || claudeBillingExhausted || !getAnthropic();
+  const tryGeminiFirst =
+    preferGemini || openaiBillingExhausted || !getOpenAI();
 
   if (tryGeminiFirst && getGemini()) {
     try {
       return await run(true);
     } catch {
-      if (getAnthropic()) return run(false);
+      if (getOpenAI()) return run(false);
       throw new Error("JSON 복구 실패");
     }
   }
-  if (getAnthropic()) {
+  if (getOpenAI()) {
     try {
       return await run(false);
     } catch (err) {
-      markClaudeBillingIfNeeded(err);
+      markOpenAIBillingIfNeeded(err);
       if (getGemini()) return run(true);
       throw new Error("JSON 복구 실패");
     }
@@ -421,10 +432,11 @@ async function completeJson<T>(params: {
         jsonMode: true,
         responseSchema: params.responseSchema,
       })
-    : await runClaudeText({
+    : await runOpenAIText({
         system,
         user: params.user,
         maxTokens: params.maxTokens,
+        jsonMode: true,
       });
 
   try {
@@ -434,7 +446,7 @@ async function completeJson<T>(params: {
     const repaired = await repairJsonText(
       text,
       params.maxTokens,
-      params.useGemini || claudeBillingExhausted,
+      params.useGemini || openaiBillingExhausted,
       params.responseSchema,
     );
     return parseLlmJson<T>(repaired);
@@ -471,41 +483,38 @@ export async function llmJson<T>(params: {
 
 type MediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 
-async function runClaudeVision(params: {
+async function runOpenAIVision(params: {
   system: string;
   user: string;
   mediaType: MediaType;
   base64: string;
   maxTokens?: number;
 }): Promise<string> {
-  const client = getAnthropic();
-  if (!client) throw new Error("ANTHROPIC_API_KEY 없음");
+  const client = getOpenAI();
+  if (!client) throw new Error("OPENAI_API_KEY 없음");
   try {
-    const res = await client.messages.create({
-      model: CLAUDE_MODEL,
+    const res = await client.chat.completions.create({
+      model: OPENAI_MODEL,
       max_tokens: params.maxTokens ?? 4096,
-      system: params.system,
       messages: [
+        { role: "system", content: params.system },
         {
           role: "user",
           content: [
+            { type: "text", text: params.user },
             {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: params.mediaType,
-                data: params.base64,
+              type: "image_url",
+              image_url: {
+                url: `data:${params.mediaType};base64,${params.base64}`,
               },
             },
-            { type: "text", text: params.user },
           ],
         },
       ],
     });
-    const block = res.content.find((c) => c.type === "text");
-    return block && block.type === "text" ? block.text : "";
+    return res.choices[0]?.message?.content?.trim() ?? "";
   } catch (err) {
-    markClaudeBillingIfNeeded(err);
+    markOpenAIBillingIfNeeded(err);
     throw err;
   }
 }
@@ -572,7 +581,7 @@ export async function llmVisionText(params: {
 }): Promise<string> {
   return withProviderFallback(
     "vision",
-    () => runClaudeVision(params),
+    () => runOpenAIVision(params),
     () => runGeminiVision(params),
   );
 }
