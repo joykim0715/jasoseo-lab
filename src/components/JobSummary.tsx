@@ -6,8 +6,8 @@ export function WarningsBanner({ warnings }: { warnings: string[] }) {
     <div className="rounded-xl border border-amber-700/25 bg-amber-50/90 px-4 py-3 text-sm text-amber-950">
       <p className="mb-1 font-medium">추출 주의</p>
       <ul className="list-disc space-y-1 pl-5">
-        {warnings.map((w) => (
-          <li key={w}>{w}</li>
+        {warnings.map((w, i) => (
+          <li key={`${i}-${w.slice(0, 24)}`}>{w}</li>
         ))}
       </ul>
     </div>
