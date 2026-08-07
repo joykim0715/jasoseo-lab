@@ -24,6 +24,12 @@ function newQuestion(partial?: Partial<EssayQuestion>): EssayQuestion {
 
 const defaultConstraints: WritingConstraints = {
   freeText: "",
+  structureStar: true,
+  leadWithPoint: true,
+  causalLogic: true,
+  jdLink: true,
+  smoothFlow: true,
+  noRepetition: true,
   blindSchool: false,
   blindCompany: false,
   blindProject: false,
@@ -35,9 +41,37 @@ const defaultConstraints: WritingConstraints = {
 function normalizeConstraints(
   raw: Partial<WritingConstraints> | null | undefined,
 ): WritingConstraints {
+  const hasCompositionKey =
+    raw != null &&
+    ("structureStar" in raw ||
+      "leadWithPoint" in raw ||
+      "causalLogic" in raw ||
+      "jdLink" in raw ||
+      "smoothFlow" in raw ||
+      "noRepetition" in raw);
+
   return {
     ...defaultConstraints,
     freeText: typeof raw?.freeText === "string" ? raw.freeText : "",
+    // 구버전 세션에는 구성 옵션이 없으므로 기본(권장)값 유지
+    structureStar: hasCompositionKey
+      ? Boolean(raw?.structureStar)
+      : defaultConstraints.structureStar,
+    leadWithPoint: hasCompositionKey
+      ? Boolean(raw?.leadWithPoint)
+      : defaultConstraints.leadWithPoint,
+    causalLogic: hasCompositionKey
+      ? Boolean(raw?.causalLogic)
+      : defaultConstraints.causalLogic,
+    jdLink: hasCompositionKey
+      ? Boolean(raw?.jdLink)
+      : defaultConstraints.jdLink,
+    smoothFlow: hasCompositionKey
+      ? Boolean(raw?.smoothFlow)
+      : defaultConstraints.smoothFlow,
+    noRepetition: hasCompositionKey
+      ? Boolean(raw?.noRepetition)
+      : defaultConstraints.noRepetition,
     blindSchool: Boolean(raw?.blindSchool),
     blindCompany: Boolean(raw?.blindCompany),
     blindProject: Boolean(raw?.blindProject),
@@ -46,6 +80,15 @@ function normalizeConstraints(
     blindDemographics: Boolean(raw?.blindDemographics),
   };
 }
+
+const COMPOSITION_OPTIONS = [
+  ["structureStar", "STAR 구조 (상황→과제→행동→결과)"],
+  ["leadWithPoint", "두괄식 (핵심을 앞에)"],
+  ["causalLogic", "인과·논리 연결 강화"],
+  ["jdLink", "JD 역량과 경험 명시 연결"],
+  ["smoothFlow", "문장·문단 흐름 자연스럽게"],
+  ["noRepetition", "중복 경험·표현 최소화"],
+] as const;
 
 const BLIND_OPTIONS = [
   ["blindSchool", "학교명 블라인드"],
@@ -314,6 +357,31 @@ export function SetupForm() {
           placeholder="추가 제약 (예: 팀 협업 강조, 이직 사유 언급 금지…)"
           className="input-field"
         />
+
+        <p className="text-sm font-medium text-[var(--ink)]">
+          작성 구성·논리·흐름
+        </p>
+        <p className="text-xs text-[var(--muted)]">
+          문장 구성과 논리 전개 방식을 고릅니다. 기본값은 권장 세팅입니다.
+        </p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {COMPOSITION_OPTIONS.map(([key, label]) => (
+            <label
+              key={key}
+              className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm"
+            >
+              <input
+                type="checkbox"
+                checked={constraints[key]}
+                onChange={(e) =>
+                  setConstraints((c) => ({ ...c, [key]: e.target.checked }))
+                }
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+
         <p className="text-sm font-medium text-[var(--ink)]">
           블라인드 채용 대응
         </p>

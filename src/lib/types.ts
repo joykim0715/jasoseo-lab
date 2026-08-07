@@ -81,6 +81,18 @@ export type EssayQuestion = {
 
 export type WritingConstraints = {
   freeText: string;
+  /** STAR(상황-과제-행동-결과) 중심으로 구성 */
+  structureStar: boolean;
+  /** 두괄식: 문단·답변 앞에 핵심 포인트 */
+  leadWithPoint: boolean;
+  /** 문제→행동→결과 인과·논리 연결 강화 */
+  causalLogic: boolean;
+  /** JD 요구역량과 경험을 명시적으로 연결 */
+  jdLink: boolean;
+  /** 문장·문단 전환을 자연스럽게, 비약·군더더기 최소화 */
+  smoothFlow: boolean;
+  /** 동일 경험·표현·키워드 반복 최소화 */
+  noRepetition: boolean;
   /** 블라인드 채용: 학교명 비노출·일반화 */
   blindSchool: boolean;
   /** 블라인드 채용: 이전 근무 기업명 비노출·일반화 */

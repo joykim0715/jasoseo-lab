@@ -24,6 +24,38 @@ const BASE_CONSTRAINTS = [
 function constraintLines(c: WritingConstraints): string[] {
   const lines: string[] = [...BASE_CONSTRAINTS];
   if (c.freeText.trim()) lines.push(c.freeText.trim());
+
+  if (c.structureStar) {
+    lines.push(
+      "구성: STAR(상황→과제→본인 행동→정량/정성 결과) 흐름으로 전개. 역할·기여가 드러나게 쓸 것",
+    );
+  }
+  if (c.leadWithPoint) {
+    lines.push(
+      "구성: 두괄식. 답변·문단 첫 문장에 핵심 주장/성과를 두고 근거를 이어갈 것",
+    );
+  }
+  if (c.causalLogic) {
+    lines.push(
+      "논리: 문제(또는 목표)→선택 이유→실행→결과로 인과가 끊기지 않게 연결. 근거 없는 결론 금지",
+    );
+  }
+  if (c.jdLink) {
+    lines.push(
+      "논리: JD 요구·우대 역량과 서술 경험을 명시적으로 연결해 '왜 이 포지션에 맞는지'가 보이게 할 것",
+    );
+  }
+  if (c.smoothFlow) {
+    lines.push(
+      "흐름: 문장·문단 전환을 자연스럽게. 갑작스런 주제 점프·군더더기·미사여구 나열 금지",
+    );
+  }
+  if (c.noRepetition) {
+    lines.push(
+      "흐름: 동일 경험·표현·키워드를 반복하지 말고, 문장마다 새로운 정보·해석을 추가할 것",
+    );
+  }
+
   if (c.blindSchool) {
     lines.push(
       "블라인드: 구체 학교명 대신 '○○대학교'·'관련 전공 과정' 등으로 일반화. 학력 브랜드로 어필하지 말 것",
@@ -96,6 +128,7 @@ async function draftOne(params: {
     system: `당신은 한국어 자기소개서 전문 라이터입니다.
 지원자 실제 경험만 사용해 문항별 답변을 작성합니다.
 채용 담당 페르소나들의 심사 포인트를 반영하되, 과도한 미사여구는 피합니다.
+문장·문단의 구성·논리·흐름 제약을 우선 준수하고, 읽히는 완결된 글로 작성합니다.
 본문은 복사해 바로 붙여넣을 수 있는 완성된 문장으로만 작성합니다.
 JSON의 body 문자열 안에서는 줄바꿈 대신 공백으로 이어서 쓰고, 따옴표는 피하세요.${freeFormHint}`,
     responseSchema: {

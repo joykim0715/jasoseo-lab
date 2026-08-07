@@ -21,6 +21,12 @@ const setupSchema = z.object({
   questions: z.array(questionSchema).min(1),
   constraints: z.object({
     freeText: z.string(),
+    structureStar: z.boolean(),
+    leadWithPoint: z.boolean(),
+    causalLogic: z.boolean(),
+    jdLink: z.boolean(),
+    smoothFlow: z.boolean(),
+    noRepetition: z.boolean(),
     blindSchool: z.boolean(),
     blindCompany: z.boolean(),
     blindProject: z.boolean(),
