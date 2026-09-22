@@ -15,7 +15,12 @@ import {
 } from "./retrieveEssays";
 import { clampProvenance, validateEssay } from "./validateEssay";
 import { loadFactMaster } from "../profile/loadFactMaster";
-import { setTimingQuestion, timingLog } from "../llmResilience";
+import {
+  classifyLlmError,
+  recoverReviseBody,
+  setTimingQuestion,
+  timingLog,
+} from "../llmResilience";
 import type {
   CandidateProfile,
   EssayAnswer,
@@ -208,6 +213,7 @@ async function draftOne(params: {
   const result = await llmJson<DraftPayload>({
     route: "quality",
     stage: "draft",
+    requireBody: true,
     system: `${DRAFT_SYSTEM}${freeFormHint}`,
     responseSchema: DRAFT_OUTPUT_SCHEMA,
     user: JSON.stringify({
@@ -284,44 +290,56 @@ async function reviseDraft(params: {
       : "제한 없음";
   const current = countChars(params.body, params.question.countSpaces);
 
-  const result = await llmJson<DraftPayload>({
-    route: "quality",
-    stage: "revise",
-    system: `한국어 자소서 부분 수정기입니다.
+  try {
+    const result = await llmJson<DraftPayload>({
+      route: "quality",
+      stage: "revise",
+      requireBody: true,
+      system: `한국어 자소서 부분 수정기입니다.
 ${KOREAN_ONLY_RULE}
 처음부터 새로 쓰지 않는다. 좋은 문장·사실·수치는 유지하고, 아래 issue만 고친다.
 Fact source는 selected episodes + allowed locked Facts 뿐이다.
 styleReferences는 문체 참고용이며 사실 source가 아니다.
 본문 JSON만 반환한다.`,
-    responseSchema: DRAFT_OUTPUT_SCHEMA,
-    user: JSON.stringify({
-      charLimit: limit,
-      currentCharCount: current,
-      issues: params.issues.map((i) => `${i.severity}:${i.code} ${i.message}`),
-      plan: {
-        thesis: params.planItem.thesis,
-        primaryEpisodeId: params.planItem.primaryEpisodeId ?? null,
-        secondaryEpisodeId: params.planItem.secondaryEpisodeId ?? null,
-        allowedFactIds: params.planItem.allowedFactIds,
-      },
-      allowedFacts: lockedFacts(params.facts).map((f) => ({
-        id: f.id,
-        label: f.label,
-        value: f.value,
-      })),
-      selectedEpisodes: params.episodes.map(formatEpisode),
-      styleReferences: formatStyleReferencesForDraft(params.styleReferences),
-      job: { company: params.job.company, role: params.job.role },
-      draft: params.body,
-    }),
-    maxTokens: 4500,
-  });
+      responseSchema: DRAFT_OUTPUT_SCHEMA,
+      user: JSON.stringify({
+        charLimit: limit,
+        currentCharCount: current,
+        issues: params.issues.map((i) => `${i.severity}:${i.code} ${i.message}`),
+        plan: {
+          thesis: params.planItem.thesis,
+          primaryEpisodeId: params.planItem.primaryEpisodeId ?? null,
+          secondaryEpisodeId: params.planItem.secondaryEpisodeId ?? null,
+          allowedFactIds: params.planItem.allowedFactIds,
+        },
+        allowedFacts: lockedFacts(params.facts).map((f) => ({
+          id: f.id,
+          label: f.label,
+          value: f.value,
+        })),
+        selectedEpisodes: params.episodes.map(formatEpisode),
+        styleReferences: formatStyleReferencesForDraft(params.styleReferences),
+        job: { company: params.job.company, role: params.job.role },
+        draft: params.body,
+      }),
+      maxTokens: 4500,
+    });
 
-  return {
-    body: (result.body ?? "").trim() || params.body,
-    usedEpisodeIds: result.usedEpisodeIds ?? [],
-    usedFactIds: result.usedFactIds ?? [],
-  };
+    return {
+      body: recoverReviseBody(params.body, result.body),
+      usedEpisodeIds: result.usedEpisodeIds ?? [],
+      usedFactIds: result.usedFactIds ?? [],
+    };
+  } catch (err) {
+    if (classifyLlmError(err).kind === "empty_output") {
+      return {
+        body: recoverReviseBody(params.body, ""),
+        usedEpisodeIds: [],
+        usedFactIds: [],
+      };
+    }
+    throw err;
+  }
 }
 
 function planItemForQuestion(

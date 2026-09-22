@@ -5,14 +5,19 @@ import {
   type ResponseSchema,
 } from "@google/generative-ai";
 import {
-  USER_LLM_BUSY,
+  UserLlmBusyError,
+  UnusableLlmOutputError,
+  assertUsableEssayBody,
   buildRouteChain,
   classifyLlmError,
+  essayBodyChars,
   isPastAbort,
   isProviderSkipped,
   LLM_CALL_TIMEOUT_MS,
+  llmBusyTelemetry,
   runProviderChain,
   shouldSkipSlowQuality,
+  timingLog,
   withCallTimeout,
 } from "./llmResilience";
 
@@ -249,7 +254,7 @@ async function executeRoute<T>(
   meta: { inputChars: number; maxTokens?: number; stage?: string },
 ): Promise<T> {
   assertAnyProvider();
-  if (isPastAbort()) throw new Error(USER_LLM_BUSY);
+  if (isPastAbort()) throw new UserLlmBusyError({ kind: "timeout" });
   const primary = getPrimaryChat();
   const includeChat =
     Boolean(primary) &&
@@ -267,7 +272,7 @@ async function executeRoute<T>(
     includeGroq: includeChat,
     includeGemini,
   });
-  if (!steps.length) throw new Error(USER_LLM_BUSY);
+  if (!steps.length) throw new UserLlmBusyError();
 
   try {
     return await runProviderChain({
@@ -279,16 +284,19 @@ async function executeRoute<T>(
         step.provider === "gemini" ? runGemini(step.model) : runChat(),
     });
   } catch (err) {
-    const classified = classifyLlmError(err);
     console.warn("[llm] all providers failed", {
       route,
       stage: meta.stage,
-      kind: classified.kind,
-      status: classified.status,
+      ...llmBusyTelemetry(err),
       inputChars: meta.inputChars,
       maxTokens: meta.maxTokens,
     });
-    throw new Error(USER_LLM_BUSY);
+    if (err instanceof UserLlmBusyError) throw err;
+    const classified = classifyLlmError(err);
+    throw new UserLlmBusyError({
+      kind: classified.kind,
+      status: classified.status,
+    });
   }
 }
 
@@ -428,6 +436,25 @@ async function repairJsonText(
   return run(true);
 }
 
+function finishJson<T>(
+  text: string,
+  parsed: T,
+  params: { requireBody?: boolean; stage?: string },
+): T {
+  if (params.requireBody) {
+    const last = getLastLlmCall();
+    timingLog("output", {
+      contentChars: text.length,
+      parsedBodyChars: essayBodyChars(parsed),
+      provider: last?.provider,
+      model: last?.model,
+      stage: params.stage,
+    });
+    assertUsableEssayBody(parsed);
+  }
+  return parsed;
+}
+
 async function completeJson<T>(params: {
   system: string;
   user: string;
@@ -435,6 +462,8 @@ async function completeJson<T>(params: {
   useGemini: boolean;
   geminiModel?: string;
   responseSchema?: ResponseSchema;
+  requireBody?: boolean;
+  stage?: string;
 }): Promise<T> {
   const system = `${params.system}\n\nRespond with valid JSON only. No markdown fences.`;
   const text = params.useGemini
@@ -454,8 +483,10 @@ async function completeJson<T>(params: {
       });
 
   try {
-    return parseLlmJson<T>(text);
+    return finishJson(text, parseLlmJson<T>(text), params);
   } catch (parseErr) {
+    if (parseErr instanceof UserLlmBusyError) throw parseErr;
+    if (parseErr instanceof UnusableLlmOutputError) throw parseErr;
     console.warn("[llm] JSON parse failed, attempting repair:", parseErr);
     const repaired = await repairJsonText(
       text,
@@ -464,7 +495,7 @@ async function completeJson<T>(params: {
       params.responseSchema,
       params.geminiModel,
     );
-    return parseLlmJson<T>(repaired);
+    return finishJson(repaired, parseLlmJson<T>(repaired), params);
   }
 }
 
@@ -474,6 +505,7 @@ export async function llmJson<T>(params: {
   maxTokens?: number;
   stage?: string;
   responseSchema?: ResponseSchema;
+  requireBody?: boolean;
   /** quality면 Gemini 우선(한국어 문장), 기본 fast는 Groq 우선 */
   route?: LlmRoute;
 }): Promise<T> {
@@ -486,6 +518,8 @@ export async function llmJson<T>(params: {
         maxTokens: params.maxTokens,
         useGemini: false,
         responseSchema: params.responseSchema,
+        requireBody: params.requireBody,
+        stage: params.stage,
       }),
     (model) =>
       completeJson<T>({
@@ -495,6 +529,8 @@ export async function llmJson<T>(params: {
         useGemini: true,
         geminiModel: model,
         responseSchema: params.responseSchema,
+        requireBody: params.requireBody,
+        stage: params.stage,
       }),
     {
       stage: params.stage,
@@ -558,7 +594,7 @@ export async function llmVisionText(params: {
     includeGroq: false,
     includeGemini: !isProviderSkipped("gemini"),
   });
-  if (!steps.length) throw new Error(USER_LLM_BUSY);
+  if (!steps.length) throw new UserLlmBusyError();
   try {
     return await runProviderChain({
       steps,
@@ -571,7 +607,8 @@ export async function llmVisionText(params: {
           model: step.model,
         }),
     });
-  } catch {
-    throw new Error(USER_LLM_BUSY);
+  } catch (err) {
+    if (err instanceof UserLlmBusyError) throw err;
+    throw new UserLlmBusyError();
   }
 }

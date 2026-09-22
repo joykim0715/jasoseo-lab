@@ -17,6 +17,9 @@ export const REQUEST_SOFT_DEADLINE_MS = 240_000;
 export const REQUEST_ABORT_MS = 260_000;
 export const VERCEL_MAX_DURATION_MS = 300_000;
 
+/** last-provider 429 recovery wait 상한. 전역 SHORT_RETRY_AFTER_MS 와 별개 */
+export const LAST_PROVIDER_RECOVERY_MAX_WAIT_MS = 15_000;
+
 export type LlmProvider = "groq" | "openai" | "gemini";
 
 export type LlmErrorKind =
@@ -25,6 +28,7 @@ export type LlmErrorKind =
   | "timeout"
   | "auth"
   | "invalid"
+  | "empty_output"
   | "other";
 
 export type ClassifiedLlmError = {
@@ -41,6 +45,109 @@ export type ChainStep = {
 export type RetryDecision =
   | { action: "retry"; delayMs: number }
   | { action: "fallback"; reason: string };
+
+export class UserLlmBusyError extends Error {
+  readonly provider?: LlmProvider;
+  readonly model?: string;
+  readonly status?: number;
+  readonly kind?: LlmErrorKind;
+  readonly rateLimit?: Record<string, string>;
+
+  constructor(ctx?: {
+    provider?: LlmProvider;
+    model?: string;
+    status?: number;
+    kind?: LlmErrorKind;
+    rateLimit?: Record<string, string>;
+  }) {
+    super(USER_LLM_BUSY);
+    this.name = "UserLlmBusyError";
+    this.provider = ctx?.provider;
+    this.model = ctx?.model;
+    this.status = ctx?.status;
+    this.kind = ctx?.kind;
+    this.rateLimit = ctx?.rateLimit;
+  }
+}
+
+export class UnusableLlmOutputError extends Error {
+  constructor() {
+    super("UNUSABLE_LLM_OUTPUT");
+    this.name = "UnusableLlmOutputError";
+  }
+}
+
+export function essayBodyChars(value: unknown): number {
+  if (!value || typeof value !== "object") return 0;
+  const body = (value as { body?: unknown }).body;
+  return typeof body === "string" ? body.trim().length : 0;
+}
+
+export function recoverReviseBody(original: string, revised: unknown): string {
+  const r = typeof revised === "string" ? revised.trim() : "";
+  if (r) return r;
+  const o = original.trim();
+  if (o) return o;
+  throw new UnusableLlmOutputError();
+}
+
+export function lastProviderRecoveryWaitMs(err: unknown): number | undefined {
+  const headers = extractErrorHeaders(err);
+  const retryAfter = parseDurationMs(headers["retry-after"]);
+  if (retryAfter != null) return retryAfter;
+  const tokRaw = headers["x-ratelimit-remaining-tokens"];
+  const tokN = tokRaw != null && tokRaw !== "" ? Number(tokRaw) : undefined;
+  if (tokN !== 0) return undefined;
+  return parseDurationMs(headers["x-ratelimit-reset-tokens"]);
+}
+
+export function assertUsableEssayBody(parsed: unknown): void {
+  if (essayBodyChars(parsed) <= 0) throw new UnusableLlmOutputError();
+}
+
+export function llmBusyTelemetry(err: unknown): {
+  provider?: LlmProvider;
+  model?: string;
+  status?: number;
+  kind?: LlmErrorKind;
+  rateLimit?: Record<string, string>;
+} {
+  if (err instanceof UserLlmBusyError) {
+    return {
+      provider: err.provider,
+      model: err.model,
+      status: err.status,
+      kind: err.kind,
+      rateLimit: err.rateLimit,
+    };
+  }
+  const classified = classifyLlmError(err);
+  return { status: classified.status, kind: classified.kind };
+}
+
+export function canLastProviderRecover(waitMs: number): boolean {
+  if (!Number.isFinite(waitMs) || waitMs < 0) return false;
+  if (waitMs > LAST_PROVIDER_RECOVERY_MAX_WAIT_MS) return false;
+  const store = llmRequest.getStore();
+  if (!store?.interactive) return false;
+  const elapsed = Date.now() - store.startedAt;
+  return elapsed + waitMs + LLM_CALL_TIMEOUT_MS < store.abortMs;
+}
+
+function busyError(
+  step?: ChainStep,
+  classified?: ClassifiedLlmError,
+  headers?: Record<string, string>,
+): UserLlmBusyError {
+  const rateLimit = headers && Object.keys(headers).length ? headers : undefined;
+  return new UserLlmBusyError({
+    provider: step?.provider,
+    model: step?.model,
+    status: classified?.status,
+    kind: classified?.kind,
+    rateLimit,
+  });
+}
 
 type LlmRequestState = {
   skipped: Partial<Record<LlmProvider, LlmErrorKind>>;
@@ -263,6 +370,16 @@ function isInvalidModel(err: unknown, status?: number): boolean {
 }
 
 export function classifyLlmError(err: unknown): ClassifiedLlmError {
+  if (err instanceof UserLlmBusyError) {
+    return {
+      retryable: false,
+      status: err.status,
+      kind: err.kind ?? "other",
+    };
+  }
+  if (err instanceof UnusableLlmOutputError) {
+    return { retryable: false, kind: "empty_output" };
+  }
   const status = extractHttpStatus(err);
   if (status === 429) {
     return { retryable: true, status, kind: "rate_limit" };
@@ -421,13 +538,15 @@ export function buildRouteChain(params: {
 }
 
 export function toUserLlmError(err: unknown, fallback = USER_LLM_BUSY): string {
+  if (err instanceof UserLlmBusyError) return USER_LLM_BUSY;
   if (err instanceof Error && err.message === USER_LLM_BUSY) return USER_LLM_BUSY;
   const classified = classifyLlmError(err);
   if (
     classified.retryable ||
     classified.kind === "auth" ||
     classified.kind === "rate_limit" ||
-    classified.kind === "server"
+    classified.kind === "server" ||
+    classified.kind === "empty_output"
   ) {
     return USER_LLM_BUSY;
   }
@@ -491,14 +610,23 @@ export async function runProviderChain<T>(params: {
   for (const [provider, kind] of Object.entries(skippedProviders())) {
     if (kind) log(`[llm] skip provider=${provider} reason=${kind}`);
   }
-  if (!steps.length) throw new Error(USER_LLM_BUSY);
+  if (!steps.length) throw new UserLlmBusyError();
 
-  let last: unknown;
+  const nextRunnable = (from: number, skipRestOfProvider: boolean, provider: LlmProvider) =>
+    steps.slice(from + 1).find((s) => {
+      if (skipRestOfProvider && s.provider === provider) return false;
+      if (s.provider === "gemini" && shouldSkipSlowQuality()) return false;
+      return true;
+    });
+
+  let lastStep: ChainStep | undefined;
+  let lastClassified: ClassifiedLlmError | undefined;
+  let lastHeaders: Record<string, string> | undefined;
 
   for (let i = 0; i < steps.length; i++) {
     if (isPastAbort()) {
       timingLog("fallback", { reason: "deadline_abort" });
-      throw new Error(USER_LLM_BUSY);
+      throw new UserLlmBusyError({ kind: "timeout" });
     }
     const step = steps[i];
     if (step.provider === "gemini" && shouldSkipSlowQuality()) {
@@ -509,11 +637,18 @@ export async function runProviderChain<T>(params: {
 
     let skipRestOfProvider = false;
     let fallbackReason = "exhausted";
+    let recoveryUsed = false;
+    let attempt = 0;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    while (true) {
       if (isPastAbort()) {
         timingLog("fallback", { reason: "deadline_abort" });
-        throw new Error(USER_LLM_BUSY);
+        throw new UserLlmBusyError({ kind: "timeout" });
+      }
+      attempt += 1;
+      if (attempt > maxAttempts + 1) {
+        fallbackReason = "attempts_exhausted";
+        break;
       }
       const started = Date.now();
       try {
@@ -530,10 +665,12 @@ export async function runProviderChain<T>(params: {
         });
         return result;
       } catch (err) {
-        last = err;
+        lastStep = step;
         const durationMs = Date.now() - started;
         const classified = classifyLlmError(err);
         const headers = extractErrorHeaders(err);
+        lastClassified = classified;
+        lastHeaders = headers;
         log(
           formatChainLog({
             stage: params.stage,
@@ -552,14 +689,42 @@ export async function runProviderChain<T>(params: {
           stage: params.stage,
         });
         const decision = decideRetry(err, attempt, sameModelRetry);
-        if (decision.action === "retry") {
+        if (decision.action === "retry" && attempt < maxAttempts) {
           log(
             `[llm] retry provider=${step.provider} delayMs=${decision.delayMs}`,
           );
           await sleep(decision.delayMs);
           continue;
         }
-        fallbackReason = decision.reason;
+        const fallbackFrom =
+          decision.action === "fallback" ? decision.reason : classified.kind;
+        // last-provider 429 recovery is exactly once; never re-enter after it is spent
+        if (recoveryUsed) {
+          fallbackReason = fallbackFrom;
+          skipRestOfProvider = classified.kind === "auth";
+          params.onStepExhausted?.(step, classified);
+          rememberExhaustedProvider(step, classified, params.steps);
+          break;
+        }
+        const isLast = !nextRunnable(i, classified.kind === "auth", step.provider);
+        if (classified.kind === "rate_limit" && isLast) {
+          const waitMs = lastProviderRecoveryWaitMs(err);
+          if (waitMs != null && canLastProviderRecover(waitMs)) {
+            recoveryUsed = true;
+            log(
+              `[llm] retry provider=${step.provider} delayMs=${waitMs} reason=last_provider_recovery`,
+            );
+            timingLog("fallback", {
+              reason: "last_provider_recovery",
+              provider: step.provider,
+              model: step.model,
+              delayMs: waitMs,
+            });
+            await sleep(waitMs);
+            continue;
+          }
+        }
+        fallbackReason = fallbackFrom;
         skipRestOfProvider = classified.kind === "auth";
         params.onStepExhausted?.(step, classified);
         rememberExhaustedProvider(step, classified, params.steps);
@@ -567,11 +732,7 @@ export async function runProviderChain<T>(params: {
       }
     }
 
-    const next = steps.slice(i + 1).find((s) => {
-      if (skipRestOfProvider && s.provider === step.provider) return false;
-      if (s.provider === "gemini" && shouldSkipSlowQuality()) return false;
-      return true;
-    });
+    const next = nextRunnable(i, skipRestOfProvider, step.provider);
     if (next) {
       log(
         `[llm] fallback reason=${fallbackReason} provider=${next.provider} model=${next.model}`,
@@ -590,8 +751,7 @@ export async function runProviderChain<T>(params: {
     }
   }
 
-  void last;
-  throw new Error(USER_LLM_BUSY);
+  throw busyError(lastStep, lastClassified, lastHeaders);
 }
 
 function httpErr(
@@ -1056,6 +1216,255 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg !== USER_LLM_BUSY) throw new Error(`L unsanitized: ${msg}`);
     if (lCalls !== 0) throw new Error(`L still called providers ${lCalls}`);
+  }
+
+  if (LAST_PROVIDER_RECOVERY_MAX_WAIT_MS !== 15_000) {
+    throw new Error("last-provider recovery wait cap must stay 15s");
+  }
+  if (SHORT_RETRY_AFTER_MS !== 3000) {
+    throw new Error("global SHORT_RETRY_AFTER_MS must stay 3000");
+  }
+
+  // 1. intermediate Gemini 429 retry-after=9 → 대기 없이 다음 provider
+  sleeps.length = 0;
+  let t1_38 = 0;
+  let t1_37 = 0;
+  const t1 = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: chainQuality,
+        sleep,
+        log,
+        run: async (step) => {
+          if (step.model === "gemini-3.8-flash") {
+            t1_38 += 1;
+            throw httpErr(429, "rate", { "retry-after": "9" });
+          }
+          if (step.model === "gemini-3.7-flash") {
+            t1_37 += 1;
+            return "g37";
+          }
+          throw new Error("1 groq");
+        },
+      }),
+    { interactive: true },
+  );
+  if (t1 !== "g37" || t1_38 !== 1 || t1_37 !== 1 || sleeps.length !== 0) {
+    throw new Error(`1 gemini 429 wait 38=${t1_38} 37=${t1_37} sleeps=${sleeps.join()}`);
+  }
+
+  // 2. last Groq 429 retry-after=9, budget ok → 9s wait, 1 retry success
+  sleeps.length = 0;
+  let t2g = 0;
+  const t2 = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: chainQuality,
+        sleep,
+        log,
+        run: async (step) => {
+          if (step.provider === "gemini") {
+            throw httpErr(429, "rate", { "retry-after": "20" });
+          }
+          t2g += 1;
+          if (t2g === 1) throw httpErr(429, "rate", { "retry-after": "9" });
+          return "groq-ok";
+        },
+      }),
+    { interactive: true },
+  );
+  if (t2 !== "groq-ok" || t2g !== 2 || sleeps.join() !== "9000") {
+    throw new Error(`2 last recovery groq=${t2g} sleeps=${sleeps.join()}`);
+  }
+
+  // 3. last retry-after=16 → no recovery → USER_LLM_BUSY
+  sleeps.length = 0;
+  let t3g = 0;
+  try {
+    await runWithLlmRequest(
+      () =>
+        runProviderChain({
+          steps: [{ provider: "groq", model: "openai/gpt-oss-120b" }],
+          sleep,
+          log,
+          run: async () => {
+            t3g += 1;
+            throw httpErr(429, "rate", { "retry-after": "16" });
+          },
+        }),
+      { interactive: true },
+    );
+    throw new Error("3 should throw");
+  } catch (err) {
+    if (!(err instanceof UserLlmBusyError)) throw new Error("3 type");
+    if (err.message !== USER_LLM_BUSY) throw new Error("3 message");
+    if (t3g !== 1 || sleeps.length !== 0) {
+      throw new Error(`3 groq=${t3g} sleeps=${sleeps.join()}`);
+    }
+  }
+
+  // 4. retry-after=9 but abort budget insufficient → no recovery
+  sleeps.length = 0;
+  let t4g = 0;
+  const t4Elapsed = REQUEST_ABORT_MS - 1_000;
+  try {
+    await runWithLlmRequest(
+      () =>
+        runProviderChain({
+          steps: [{ provider: "groq", model: "openai/gpt-oss-120b" }],
+          sleep,
+          log,
+          run: async () => {
+            t4g += 1;
+            throw httpErr(429, "rate", { "retry-after": "9" });
+          },
+        }),
+      { interactive: true, startedAt: Date.now() - t4Elapsed },
+    );
+    throw new Error("4 should throw");
+  } catch (err) {
+    if (!(err instanceof UserLlmBusyError)) throw new Error("4 type");
+    if (t4g !== 1 || sleeps.length !== 0) {
+      throw new Error(`4 groq=${t4g} sleeps=${sleeps.join()}`);
+    }
+  }
+
+  // 5. recovery retry also 429 → no second retry
+  sleeps.length = 0;
+  let t5g = 0;
+  try {
+    await runWithLlmRequest(
+      () =>
+        runProviderChain({
+          steps: [{ provider: "groq", model: "openai/gpt-oss-120b" }],
+          sleep,
+          log,
+          run: async () => {
+            t5g += 1;
+            throw httpErr(429, "rate", { "retry-after": "9" });
+          },
+        }),
+      { interactive: true },
+    );
+    throw new Error("5 should throw");
+  } catch (err) {
+    if (!(err instanceof UserLlmBusyError)) throw new Error("5 type");
+    if (t5g !== 2 || sleeps.join() !== "9000") {
+      throw new Error(`5 groq=${t5g} sleeps=${sleeps.join()}`);
+    }
+  }
+
+  // 6. HTTP/JSON success, body missing → usable failure → next provider
+  const t6 = await runProviderChain({
+    steps: [
+      { provider: "gemini", model: "gemini-3.8-flash" },
+      { provider: "groq", model: "openai/gpt-oss-120b" },
+    ],
+    sleep,
+    log,
+    run: async (step) => {
+      if (step.provider === "gemini") {
+        assertUsableEssayBody({ title: "x" });
+        return { body: "should-not" };
+      }
+      assertUsableEssayBody({ body: "usable draft" });
+      return { body: "usable draft" };
+    },
+  });
+  if ((t6 as { body: string }).body !== "usable draft") throw new Error("6 fallback");
+
+  // 7. body="" / whitespace → same
+  const t7 = await runProviderChain({
+    steps: [
+      { provider: "gemini", model: "gemini-3.8-flash" },
+      { provider: "groq", model: "openai/gpt-oss-120b" },
+    ],
+    sleep,
+    log,
+    run: async (step) => {
+      if (step.provider === "gemini") {
+        assertUsableEssayBody({ body: "  \n" });
+        return { body: "  \n" };
+      }
+      assertUsableEssayBody({ body: "ok" });
+      return { body: "ok" };
+    },
+  });
+  if ((t7 as { body: string }).body !== "ok") throw new Error("7 whitespace");
+  const t7empty = await runProviderChain({
+    steps: [
+      { provider: "gemini", model: "gemini-3.7-flash" },
+      { provider: "groq", model: "openai/gpt-oss-120b" },
+    ],
+    sleep,
+    log,
+    run: async (step) => {
+      if (step.provider === "gemini") {
+        assertUsableEssayBody({ body: "" });
+        return { body: "" };
+      }
+      return { body: "ok" };
+    },
+  });
+  if ((t7empty as { body: string }).body !== "ok") throw new Error("7 empty string");
+
+  // 8. revise empty + original non-empty → original
+  if (recoverReviseBody("원문 유지", "") !== "원문 유지") {
+    throw new Error("8 original not kept");
+  }
+  if (recoverReviseBody("원문", "  ") !== "원문") {
+    throw new Error("8 whitespace revise");
+  }
+
+  // 9. original empty + revise empty → not success
+  try {
+    recoverReviseBody("", "");
+    throw new Error("9 should throw");
+  } catch (err) {
+    if (!(err instanceof UnusableLlmOutputError)) throw new Error("9 type");
+  }
+  try {
+    recoverReviseBody("  ", null);
+    throw new Error("9b should throw");
+  } catch (err) {
+    if (!(err instanceof UnusableLlmOutputError)) throw new Error("9b type");
+  }
+  if (essayBodyChars({ body: null }) !== 0) throw new Error("9c null body");
+  if (essayBodyChars({}) !== 0) throw new Error("9d missing body");
+
+  // 10. USER_LLM_BUSY telemetry keeps first provider/model/status
+  try {
+    await runWithLlmRequest(
+      () =>
+        runProviderChain({
+          steps: [{ provider: "groq", model: "openai/gpt-oss-120b" }],
+          sleep,
+          log,
+          run: async () => {
+            throw httpErr(429, "rate", { "retry-after": "16" });
+          },
+        }),
+      { interactive: true },
+    );
+    throw new Error("10 should throw");
+  } catch (err) {
+    if (!(err instanceof UserLlmBusyError)) throw new Error("10 type");
+    const tel = llmBusyTelemetry(err);
+    if (tel.provider !== "groq" || tel.model !== "openai/gpt-oss-120b") {
+      throw new Error(`10 provider ${tel.provider}/${tel.model}`);
+    }
+    if (tel.status !== 429 || tel.kind !== "rate_limit") {
+      throw new Error(`10 status ${tel.status} kind ${tel.kind}`);
+    }
+    if (tel.rateLimit?.["retry-after"] !== "16") {
+      throw new Error("10 retry-after metadata lost");
+    }
+    if (err.message !== USER_LLM_BUSY) throw new Error("10 ui message");
+    const rethrown = err;
+    const tel2 = llmBusyTelemetry(rethrown);
+    if (tel2.status !== 429 || tel2.provider !== "groq") {
+      throw new Error("10 rethrow lost metadata");
+    }
   }
 
   const t0 = Date.now();
