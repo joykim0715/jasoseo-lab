@@ -87,6 +87,7 @@ export function ResultView() {
 
   const allText =
     result?.answers
+      .filter((a) => !a.failed && a.body.trim())
       .map((a, i) => {
         if (markdown) {
           return `## ${i + 1}. ${a.title}\n\n${a.body}`;
@@ -94,6 +95,7 @@ export function ResultView() {
         return `[${i + 1}. ${a.title}]\n\n${a.body}`;
       })
       .join("\n\n--------------------\n\n") ?? "";
+  const failedCount = result?.answers.filter((a) => a.failed).length ?? 0;
 
   if (!job || !setup) {
     return (
@@ -146,6 +148,12 @@ export function ResultView() {
 
       {result && (
         <>
+          {failedCount > 0 && (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+              {failedCount}개 문항은 모델 한도로 비었습니다. 완성된 문항은
+              그대로 두고, 빈 문항만 다시 생성할 수 있습니다.
+            </p>
+          )}
           <div className="animate-fade flex flex-wrap items-center gap-3">
             <CopyButton text={allText} label="전체 복사" />
             <label className="flex items-center gap-2 text-sm text-[var(--muted)]">
@@ -224,14 +232,18 @@ export function ResultView() {
                     )}
                   </div>
                   <div className="flex gap-2">
-                    <CopyButton text={a.body} label="문항 복사" />
+                    {!a.failed && <CopyButton text={a.body} label="문항 복사" />}
                     <button
                       type="button"
                       disabled={regenId === a.questionId}
                       onClick={() => regenerate(a.questionId)}
-                      className="btn-ghost"
+                      className={a.failed ? "btn-primary" : "btn-ghost"}
                     >
-                      {regenId === a.questionId ? "재생성…" : "다시 생성"}
+                      {regenId === a.questionId
+                        ? "재생성…"
+                        : a.failed
+                          ? "이 문항만 다시 생성"
+                          : "다시 생성"}
                     </button>
                   </div>
                 </div>
@@ -249,9 +261,15 @@ export function ResultView() {
                   </div>
                 )}
 
-                <pre className="whitespace-pre-wrap font-sans text-[15px] leading-7 text-[var(--ink)]">
-                  {a.body}
-                </pre>
+                {a.failed ? (
+                  <p className="text-sm text-[var(--muted)]">
+                    이 문항 본문은 저장되지 않았습니다.
+                  </p>
+                ) : (
+                  <pre className="whitespace-pre-wrap font-sans text-[15px] leading-7 text-[var(--ink)]">
+                    {a.body}
+                  </pre>
+                )}
               </article>
             ))}
           </div>

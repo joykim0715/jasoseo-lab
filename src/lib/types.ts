@@ -158,6 +158,8 @@ export type EssayAnswer = {
   retrievedEssayIds?: string[];
   revised?: boolean;
   validation?: EssayValidationResult;
+  failed?: boolean;
+  retryable?: boolean;
 };
 
 export type GenerateResult = {

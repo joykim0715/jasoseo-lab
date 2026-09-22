@@ -17,7 +17,7 @@ export const REQUEST_SOFT_DEADLINE_MS = 240_000;
 export const REQUEST_ABORT_MS = 260_000;
 export const VERCEL_MAX_DURATION_MS = 300_000;
 
-/** last-provider 429 recovery wait 상한. 전역 SHORT_RETRY_AFTER_MS 와 별개 */
+/** inferred reset-tokens 만 이 상한. 명시적 retry-after 는 abort budget 으로 판단 */
 export const LAST_PROVIDER_RECOVERY_MAX_WAIT_MS = 15_000;
 
 export type LlmProvider = "groq" | "openai" | "gemini";
@@ -112,14 +112,23 @@ export function recoverReviseBody(original: string, revised: unknown): string {
   throw new UnusableLlmOutputError();
 }
 
-export function lastProviderRecoveryWaitMs(err: unknown): number | undefined {
+export function lastProviderRecoveryPlan(err: unknown): {
+  waitMs: number;
+  explicitRetryAfter: boolean;
+} | undefined {
   const headers = extractErrorHeaders(err);
   const retryAfter = parseDurationMs(headers["retry-after"]);
-  if (retryAfter != null) return retryAfter;
+  if (retryAfter != null) return { waitMs: retryAfter, explicitRetryAfter: true };
   const tokRaw = headers["x-ratelimit-remaining-tokens"];
   const tokN = tokRaw != null && tokRaw !== "" ? Number(tokRaw) : undefined;
   if (tokN !== 0) return undefined;
-  return parseDurationMs(headers["x-ratelimit-reset-tokens"]);
+  const reset = parseDurationMs(headers["x-ratelimit-reset-tokens"]);
+  if (reset == null) return undefined;
+  return { waitMs: reset, explicitRetryAfter: false };
+}
+
+export function lastProviderRecoveryWaitMs(err: unknown): number | undefined {
+  return lastProviderRecoveryPlan(err)?.waitMs;
 }
 
 export function assertUsableEssayBody(parsed: unknown): void {
@@ -146,13 +155,59 @@ export function llmBusyTelemetry(err: unknown): {
   return { status: classified.status, kind: classified.kind };
 }
 
-export function canLastProviderRecover(waitMs: number): boolean {
+export function canLastProviderRecover(
+  waitMs: number,
+  explicitRetryAfter = false,
+): boolean {
   if (!Number.isFinite(waitMs) || waitMs < 0) return false;
-  if (waitMs > LAST_PROVIDER_RECOVERY_MAX_WAIT_MS) return false;
+  if (!explicitRetryAfter && waitMs > LAST_PROVIDER_RECOVERY_MAX_WAIT_MS) {
+    return false;
+  }
   const store = llmRequest.getStore();
   if (!store?.interactive) return false;
   const elapsed = Date.now() - store.startedAt;
   return elapsed + waitMs + LLM_CALL_TIMEOUT_MS < store.abortMs;
+}
+
+export function noteGroqRateLimit(headers: Record<string, string>) {
+  const store = llmRequest.getStore();
+  if (!store) return;
+  store.groqRateLimit = {
+    at: Date.now(),
+    headers: pickRateLimitHeaders(headers),
+  };
+}
+
+export function groqPaceWaitMs(nextNeedTokens = 4000): number {
+  const store = llmRequest.getStore();
+  const rl = store?.groqRateLimit;
+  if (!rl) return 0;
+  const remainingTok = Number(rl.headers["x-ratelimit-remaining-tokens"]);
+  const retryAfter = parseDurationMs(rl.headers["retry-after"]);
+  const resetTok = parseDurationMs(rl.headers["x-ratelimit-reset-tokens"]);
+  const since = Date.now() - rl.at;
+  if (Number.isFinite(remainingTok) && remainingTok >= nextNeedTokens) return 0;
+  const raw =
+    Number.isFinite(remainingTok) && remainingTok < nextNeedTokens
+      ? Math.max(retryAfter ?? 0, resetTok ?? 0)
+      : (retryAfter ?? resetTok ?? 0);
+  if (raw <= 0) return 0;
+  return Math.max(0, raw - since);
+}
+
+export async function paceGroqIfNeeded(
+  nextNeedTokens = 4000,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+) {
+  const waitMs = groqPaceWaitMs(nextNeedTokens);
+  if (waitMs <= 0) return;
+  const store = llmRequest.getStore();
+  if (store?.interactive) {
+    const elapsed = Date.now() - store.startedAt;
+    if (elapsed + waitMs + LLM_CALL_TIMEOUT_MS >= store.abortMs) return;
+  }
+  timingLog("fallback", { reason: "groq_pace", delayMs: waitMs });
+  await sleep(waitMs);
 }
 
 function skipRestOfProviderAfter(
@@ -190,6 +245,7 @@ type LlmRequestState = {
   softDeadlineMs: number;
   abortMs: number;
   question?: number;
+  groqRateLimit?: { at: number; headers: Record<string, string> };
 };
 
 export type LlmRequestOptions = {
@@ -301,7 +357,7 @@ export function filterAvailableSteps(steps: ChainStep[]): ChainStep[] {
   return steps.filter((s) => !isProviderSkipped(s.provider));
 }
 
-/** 429/auth 만 요청 범위에서 provider 를 뺀다. 5xx 는 다음 stage 에서 다시 시도. */
+/** 429/auth 는 요청 범위 skip. interactive Gemini 5xx 도 이후 stage 에서 Gemini 를 다시 안 친다. */
 export function rememberExhaustedProvider(
   step: ChainStep,
   classified: ClassifiedLlmError,
@@ -309,6 +365,14 @@ export function rememberExhaustedProvider(
 ) {
   if (classified.kind === "auth") {
     markProviderSkipped(step.provider, classified.kind);
+    return;
+  }
+  if (
+    classified.kind === "server" &&
+    step.provider === "gemini" &&
+    !sameModelRetryEnabled()
+  ) {
+    markProviderSkipped("gemini", classified.kind);
     return;
   }
   if (classified.kind !== "rate_limit") return;
@@ -705,6 +769,9 @@ export async function runProviderChain<T>(params: {
         const headers = extractErrorHeaders(err);
         lastClassified = classified;
         lastHeaders = headers;
+        if (step.provider === "groq" && classified.kind === "rate_limit") {
+          noteGroqRateLimit(headers);
+        }
         log(
           formatChainLog({
             stage: params.stage,
@@ -743,8 +810,9 @@ export async function runProviderChain<T>(params: {
         }
         const isLast = !nextRunnable(i, skipRest, step.provider);
         if (classified.kind === "rate_limit" && isLast) {
-          const waitMs = lastProviderRecoveryWaitMs(err);
-          if (waitMs != null && canLastProviderRecover(waitMs)) {
+          const plan = lastProviderRecoveryPlan(err);
+          if (plan && canLastProviderRecover(plan.waitMs, plan.explicitRetryAfter)) {
+            const waitMs = plan.waitMs;
             recoveryUsed = true;
             log(
               `[llm] retry provider=${step.provider} delayMs=${waitMs} reason=last_provider_recovery`,
@@ -1256,7 +1324,7 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
   }
 
   if (LAST_PROVIDER_RECOVERY_MAX_WAIT_MS !== 15_000) {
-    throw new Error("last-provider recovery wait cap must stay 15s");
+    throw new Error("inferred reset-tokens wait cap must stay 15s");
   }
   if (SHORT_RETRY_AFTER_MS !== 3000) {
     throw new Error("global SHORT_RETRY_AFTER_MS must stay 3000");
@@ -1314,9 +1382,30 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
     throw new Error(`2 last recovery groq=${t2g} sleeps=${sleeps.join()}`);
   }
 
-  // 3. last retry-after=16 → no recovery → USER_LLM_BUSY
+  // 3. last retry-after=16, budget ok → wait 16s (15s cap 없음)
   sleeps.length = 0;
   let t3g = 0;
+  const t3 = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: [{ provider: "groq", model: "openai/gpt-oss-120b" }],
+        sleep,
+        log,
+        run: async () => {
+          t3g += 1;
+          if (t3g === 1) throw httpErr(429, "rate", { "retry-after": "16" });
+          return "ok16";
+        },
+      }),
+    { interactive: true },
+  );
+  if (t3 !== "ok16" || t3g !== 2 || sleeps.join() !== "16000") {
+    throw new Error(`3 budget wait 16s groq=${t3g} sleeps=${sleeps.join()}`);
+  }
+
+  // 3b. inferred reset-tokens 20s, no retry-after → still no wait
+  sleeps.length = 0;
+  let t3b = 0;
   try {
     await runWithLlmRequest(
       () =>
@@ -1325,18 +1414,20 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
           sleep,
           log,
           run: async () => {
-            t3g += 1;
-            throw httpErr(429, "rate", { "retry-after": "16" });
+            t3b += 1;
+            throw httpErr(429, "rate", {
+              "x-ratelimit-remaining-tokens": "0",
+              "x-ratelimit-reset-tokens": "20s",
+            });
           },
         }),
       { interactive: true },
     );
-    throw new Error("3 should throw");
+    throw new Error("3b should throw");
   } catch (err) {
-    if (!(err instanceof UserLlmBusyError)) throw new Error("3 type");
-    if (err.message !== USER_LLM_BUSY) throw new Error("3 message");
-    if (t3g !== 1 || sleeps.length !== 0) {
-      throw new Error(`3 groq=${t3g} sleeps=${sleeps.join()}`);
+    if (!(err instanceof UserLlmBusyError)) throw new Error("3b type");
+    if (t3b !== 1 || sleeps.length !== 0) {
+      throw new Error(`3b inferred wait groq=${t3b} sleeps=${sleeps.join()}`);
     }
   }
 
@@ -1475,6 +1566,32 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
   if (coerced.body !== "본문이 content 키에 있음") throw new Error("9e coerce content");
   const stillEmpty = coerceEssayBody({ title: "x", usedEpisodeIds: [] });
   if (essayBodyChars(stillEmpty) !== 0) throw new Error("9f short alias must not coerce");
+
+  // 11. Groq remaining/reset pacing (842 < next reservation → wait reset)
+  await runWithLlmRequest(async () => {
+    if (groqPaceWaitMs() !== 0) throw new Error("11 idle");
+    noteGroqRateLimit({
+      "x-ratelimit-remaining-tokens": "5000",
+      "x-ratelimit-reset-tokens": "10s",
+      "retry-after": "8",
+    });
+    if (groqPaceWaitMs(2200) !== 0) throw new Error("11 remaining enough");
+    noteGroqRateLimit({
+      "x-ratelimit-remaining-tokens": "842",
+      "x-ratelimit-reset-tokens": "53.70s",
+      "retry-after": "16",
+    });
+    const pLow = groqPaceWaitMs(2200);
+    if (pLow < 52_000 || pLow > 53_700) {
+      throw new Error(`11 low remaining wait ${pLow}`);
+    }
+    noteGroqRateLimit({
+      "x-ratelimit-remaining-tokens": "0",
+      "x-ratelimit-reset-tokens": "5s",
+    });
+    const p0 = groqPaceWaitMs(2200);
+    if (p0 < 4_000 || p0 > 5_000) throw new Error(`11 reset wait ${p0}`);
+  }, { interactive: true });
 
   // 10. USER_LLM_BUSY telemetry keeps first provider/model/status
   try {

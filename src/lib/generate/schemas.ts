@@ -65,6 +65,8 @@ const essayAnswerSchema = z.object({
   usedFactIds: z.array(z.string()).optional(),
   retrievedEssayIds: z.array(z.string()).optional(),
   revised: z.boolean().optional(),
+  failed: z.boolean().optional(),
+  retryable: z.boolean().optional(),
   validation: z
     .object({
       valid: z.boolean(),

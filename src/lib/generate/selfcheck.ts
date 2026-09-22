@@ -746,6 +746,22 @@ export async function runEngine20SelfCheck() {
   });
   assert(legacy2.answers[0].validation === undefined, "legacy answer has no validation field");
   assert(legacy2.answers[0].usedFactIds === undefined, "legacy usedFactIds optional");
+  assert(legacy2.answers[0].failed === undefined, "legacy failed optional");
+
+  const failedPartial = previousResultSchema.parse({
+    ...legacy2,
+    answers: [
+      {
+        ...legacy2.answers[0],
+        body: "",
+        charCount: 0,
+        failed: true,
+        retryable: true,
+      },
+    ],
+  });
+  assert(failedPartial.answers[0].failed === true, "failed answer flag");
+  assert(failedPartial.answers[0].retryable === true, "failed retryable");
 
   const llmRes = await runLlmResilienceSelfCheck();
   assert(llmRes === "ok", "llm resilience");

@@ -17,9 +17,12 @@ import { clampProvenance, validateEssay } from "./validateEssay";
 import { loadFactMaster } from "../profile/loadFactMaster";
 import {
   classifyLlmError,
+  paceGroqIfNeeded,
   recoverReviseBody,
   setTimingQuestion,
   timingLog,
+  USER_LLM_BUSY,
+  UserLlmBusyError,
 } from "../llmResilience";
 import type {
   CandidateProfile,
@@ -179,6 +182,23 @@ type DraftPayload = {
 export function essayOutputMaxTokens(charLimit: number): number {
   if (!Number.isFinite(charLimit) || charLimit <= 0) return 2200;
   return Math.min(3200, Math.max(1000, Math.round(charLimit * 1.8) + 400));
+}
+
+function failedEssayAnswer(question: EssayQuestion): EssayAnswer {
+  return {
+    questionId: question.id,
+    title: question.title,
+    prompt: question.prompt,
+    body: "",
+    charCount: 0,
+    charLimit: question.charLimit,
+    countSpaces: question.countSpaces,
+    withinLimit: true,
+    constraintNotes: [USER_LLM_BUSY],
+    usedEpisodeIds: [],
+    failed: true,
+    retryable: true,
+  };
 }
 
 function lockedFacts(facts: FactItem[]): FactItem[] {
@@ -473,6 +493,27 @@ export async function generateEssays(params: {
   async function writeOne(question: EssayQuestion): Promise<EssayAnswer> {
     const questionN = questions.indexOf(question) + 1;
     setTimingQuestion(questionN);
+    await paceGroqIfNeeded(essayOutputMaxTokens(question.charLimit));
+    try {
+      return await writeOneUnlocked(question, questionN);
+    } catch (err) {
+      if (params.onlyQuestionId) throw err;
+      timingLog("question_failed", {
+        question: questionN,
+        kind: classifyLlmError(err).kind,
+      });
+      console.warn("[essay] question failed", {
+        questionId: question.id,
+        kind: classifyLlmError(err).kind,
+      });
+      return failedEssayAnswer(question);
+    }
+  }
+
+  async function writeOneUnlocked(
+    question: EssayQuestion,
+    questionN: number,
+  ): Promise<EssayAnswer> {
     const planItem: EssayPlanItem =
       planItemForQuestion(plan, question.id) ??
       buildEssayPlan({
@@ -649,6 +690,9 @@ export async function generateEssays(params: {
   }
 
   const answers = await mapPool(questions, 1, writeOne);
+  if (answers.length > 0 && answers.every((a) => a.failed)) {
+    throw new UserLlmBusyError();
+  }
 
   const matchingNotes = plan.items.flatMap((item) => {
     const q = allQuestions.find((x) => x.id === item.questionId);
