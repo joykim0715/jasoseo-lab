@@ -97,6 +97,7 @@ export async function buildPersonas(job: JobPosting): Promise<HiringPersona[]> {
         weight: number;
       }[];
     }>({
+      stage: "persona",
       system: `You design 2-4 hiring reviewer personas for a Korean job posting.
 Each persona represents a realistic stakeholder (HR, hiring manager, domain expert, etc.).
 weight: 0.1-1.0 relative influence. Respond in Korean for text fields.

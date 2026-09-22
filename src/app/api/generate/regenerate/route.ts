@@ -8,6 +8,7 @@ import {
   setupSchema,
 } from "@/lib/generate/schemas";
 import { loadCandidateProfile } from "@/lib/profile/loadProfile";
+import { runWithLlmRequest, toUserLlmError } from "@/lib/llmResilience";
 import type { EssayPlan, GenerateResult, HiringPersona } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -52,14 +53,16 @@ export async function POST(req: NextRequest) {
 
     const { profile } = await loadCandidateProfile();
     const previousPlan = previous?.plan as EssayPlan | undefined;
-    const partial = await generateEssays({
-      profile,
-      job,
-      setup,
-      personas,
-      onlyQuestionId: questionId,
-      previousPlan,
-    });
+    const partial = await runWithLlmRequest(() =>
+      generateEssays({
+        profile,
+        job,
+        setup,
+        personas,
+        onlyQuestionId: questionId,
+        previousPlan,
+      }),
+    );
 
     const mergedAnswers = previous?.answers
       ? previous.answers.map((a) => {
@@ -92,7 +95,10 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-    const message = err instanceof Error ? err.message : "재생성에 실패했습니다.";
+    const message = toUserLlmError(
+      err,
+      err instanceof Error ? err.message : "재생성에 실패했습니다.",
+    );
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

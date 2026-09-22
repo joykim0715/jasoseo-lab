@@ -4,15 +4,24 @@ import {
   SchemaType,
   type ResponseSchema,
 } from "@google/generative-ai";
+import {
+  USER_LLM_BUSY,
+  buildRouteChain,
+  classifyLlmError,
+  isProviderSkipped,
+  runProviderChain,
+} from "./llmResilience";
 
 /** 무료 메인: Groq (OpenAI 호환 API) */
 export const GROQ_MODEL =
   process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 /** 유료 옵션(선택): OpenAI */
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
-/** 한국어 문장: Gemini. 구형 flash로 조용히 내려가지 않음 */
+/** 한국어 문장: Gemini. GEMINI_MODEL env가 있으면 1순위로 존중 */
 export const GEMINI_MODEL =
   process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
+
+export { USER_LLM_BUSY, GEMINI_FALLBACK_MODEL } from "./llmResilience";
 
 let lastLlmCall: { provider: "groq" | "openai" | "gemini"; model: string } | null =
   null;
@@ -25,18 +34,15 @@ let groq: OpenAI | null = null;
 let openai: OpenAI | null = null;
 let gemini: GoogleGenerativeAI | null = null;
 
-let groqQuotaExhausted = false;
 let openaiBillingExhausted = false;
-let geminiQuotaExhausted = false;
 
 export function llmStatus() {
   const primary = getPrimaryChat()?.name ?? (getGemini() ? "gemini" : "none");
   return {
-    groqConfigured: Boolean(process.env.GROQ_API_KEY) && !groqQuotaExhausted,
+    groqConfigured: Boolean(process.env.GROQ_API_KEY),
     openaiConfigured:
       Boolean(process.env.OPENAI_API_KEY) && !openaiBillingExhausted,
-    geminiConfigured:
-      Boolean(process.env.GEMINI_API_KEY) && !geminiQuotaExhausted,
+    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
     claudeConfigured: false,
     primary,
     fallback: "gemini" as const,
@@ -49,7 +55,6 @@ export type { ResponseSchema };
 type ChatProvider = "groq" | "openai";
 
 function getGroq() {
-  if (groqQuotaExhausted) return null;
   if (!process.env.GROQ_API_KEY) return null;
   if (!groq) {
     groq = new OpenAI({
@@ -70,7 +75,6 @@ function getOpenAI() {
 }
 
 function getGemini() {
-  if (geminiQuotaExhausted) return null;
   if (!process.env.GEMINI_API_KEY) return null;
   if (!gemini) {
     gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -93,28 +97,9 @@ function getPrimaryChat(): {
 
 function assertAnyProvider() {
   if (getPrimaryChat() || getGemini()) return;
-
-  if (groqQuotaExhausted && geminiQuotaExhausted) {
-    throw new Error(
-      "Groq·Gemini 모두 요청 한도를 초과했습니다. 잠시 후 다시 시도하거나 console.groq.com 에서 새 키/한도를 확인해 주세요.",
-    );
-  }
-  if (geminiQuotaExhausted && !process.env.GROQ_API_KEY) {
-    throw new Error(
-      "Gemini 요청 한도(429) 초과. 무료로 쓰려면 Groq API 키(GROQ_API_KEY)를 추가하세요: console.groq.com",
-    );
-  }
   throw new Error(
     "GROQ_API_KEY 또는 GEMINI_API_KEY 중 하나 이상이 필요합니다. (권장: 둘 다 — 무료)",
   );
-}
-
-function markGroqQuotaIfNeeded(err: unknown) {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/429|rate_limit|too many requests|quota/i.test(msg)) {
-    groqQuotaExhausted = true;
-    console.warn("[llm] Groq rate limited — skipping Groq for this process");
-  }
 }
 
 function markOpenAIBillingIfNeeded(err: unknown) {
@@ -126,20 +111,6 @@ function markOpenAIBillingIfNeeded(err: unknown) {
   ) {
     openaiBillingExhausted = true;
     console.warn("[llm] OpenAI billing exhausted — skipping OpenAI");
-  }
-}
-
-function isGeminiQuotaError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /429|Too Many Requests|RESOURCE_EXHAUSTED|exceeded your|quota/i.test(
-    msg,
-  );
-}
-
-function markGeminiQuotaIfNeeded(err: unknown) {
-  if (isGeminiQuotaError(err)) {
-    geminiQuotaExhausted = true;
-    console.warn("[llm] Gemini quota/rate limited — skipping Gemini");
   }
 }
 
@@ -261,86 +232,50 @@ function parseLlmJson<T>(text: string): T {
 
 export type LlmRoute = "fast" | "quality";
 
-/**
- * fast: Groq/OpenAI → Gemini (구조화·추출용)
- * quality: Gemini → Groq/OpenAI (한국어 자소서 문장용)
- */
-async function withProviderFallback<T>(
-  label: string,
-  runPrimary: () => Promise<T>,
-  runGemini: () => Promise<T>,
-  route: LlmRoute = "fast",
+async function executeRoute<T>(
+  route: LlmRoute,
+  runChat: () => Promise<T>,
+  runGemini: (model: string) => Promise<T>,
+  meta: { inputChars: number; maxTokens?: number; stage?: string },
 ): Promise<T> {
   assertAnyProvider();
-  const hasPrimary = Boolean(getPrimaryChat());
-  const hasGemini = Boolean(getGemini());
-
-  if (route === "quality" && hasGemini) {
-    try {
-      return await runGemini();
-    } catch (geminiErr) {
-      markGeminiQuotaIfNeeded(geminiErr);
-      if (hasPrimary) {
-        console.warn(`[llm] Gemini ${label} failed → Groq/OpenAI:`, geminiErr);
-        try {
-          return await runPrimary();
-        } catch (primaryErr) {
-          throw new Error(formatProviderError(primaryErr, geminiErr));
-        }
-      }
-      throw new Error(formatProviderError(undefined, geminiErr));
-    }
-  }
-
-  if (hasPrimary) {
-    try {
-      return await runPrimary();
-    } catch (err) {
-      if (hasGemini) {
-        console.warn(`[llm] Primary ${label} failed → Gemini:`, err);
-        try {
-          return await runGemini();
-        } catch (geminiErr) {
-          throw new Error(formatProviderError(err, geminiErr));
-        }
-      }
-      throw new Error(formatProviderError(err));
-    }
-  }
+  const primary = getPrimaryChat();
+  const includeChat =
+    Boolean(primary) &&
+    !(primary?.name === "groq" && isProviderSkipped("groq")) &&
+    !(primary?.name === "openai" && isProviderSkipped("openai"));
+  const includeGemini = Boolean(getGemini()) && !isProviderSkipped("gemini");
+  const steps = buildRouteChain({
+    route,
+    groqModel: includeChat ? primary?.model : undefined,
+    chatProvider: primary?.name,
+    geminiPrimary: GEMINI_MODEL,
+    includeGroq: includeChat,
+    includeGemini,
+  });
+  if (!steps.length) throw new Error(USER_LLM_BUSY);
 
   try {
-    return await runGemini();
-  } catch (geminiErr) {
-    throw new Error(formatProviderError(undefined, geminiErr));
+    return await runProviderChain({
+      steps,
+      stage: meta.stage,
+      inputChars: meta.inputChars,
+      maxTokens: meta.maxTokens,
+      run: (step) =>
+        step.provider === "gemini" ? runGemini(step.model) : runChat(),
+    });
+  } catch (err) {
+    const classified = classifyLlmError(err);
+    console.warn("[llm] all providers failed", {
+      route,
+      stage: meta.stage,
+      kind: classified.kind,
+      status: classified.status,
+      inputChars: meta.inputChars,
+      maxTokens: meta.maxTokens,
+    });
+    throw new Error(USER_LLM_BUSY);
   }
-}
-
-function formatProviderError(primaryErr?: unknown, geminiErr?: unknown): string {
-  const parts: string[] = [];
-  const primaryMsg = primaryErr instanceof Error ? primaryErr.message : "";
-  const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "";
-
-  if (/429|rate_limit|too many requests/i.test(primaryMsg)) {
-    parts.push("Groq/메인 LLM 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.");
-  } else if (/insufficient_quota|billing|credit|payment/i.test(primaryMsg)) {
-    parts.push(
-      "유료 LLM 잔액이 부족합니다. 무료로 쓰려면 GROQ_API_KEY를 설정하세요.",
-    );
-  } else if (primaryMsg) {
-    parts.push(`메인 LLM: ${primaryMsg.slice(0, 180)}`);
-  }
-
-  if (/429|Too Many Requests|RESOURCE_EXHAUSTED|exceeded your/i.test(geminiMsg)) {
-    parts.push(
-      "Gemini 무료 한도(429) 초과. 잠시 기다리거나 Groq 키를 추가하세요 (console.groq.com).",
-    );
-  } else if (/API_KEY|api key|401|403/i.test(geminiMsg)) {
-    parts.push("Gemini API 키가 유효하지 않습니다.");
-  } else if (geminiMsg) {
-    parts.push(`Gemini: ${geminiMsg.slice(0, 180)}`);
-  }
-
-  return parts.join(" / ") || "LLM 호출에 실패했습니다.";
 }
 
 async function runPrimaryText(params: {
@@ -366,17 +301,9 @@ async function runPrimaryText(params: {
     });
     return res.choices[0]?.message?.content?.trim() ?? "";
   } catch (err) {
-    if (primary.name === "groq") markGroqQuotaIfNeeded(err);
-    else markOpenAIBillingIfNeeded(err);
+    if (primary.name === "openai") markOpenAIBillingIfNeeded(err);
     throw err;
   }
-}
-
-function isGeminiModelMissingError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /no longer available|not found|404|is not found|not supported for/i.test(
-    msg,
-  );
 }
 
 async function runGeminiText(params: {
@@ -385,55 +312,49 @@ async function runGeminiText(params: {
   maxTokens?: number;
   jsonMode?: boolean;
   responseSchema?: ResponseSchema;
+  model?: string;
 }): Promise<string> {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
+  const modelName = params.model ?? GEMINI_MODEL;
 
-  try {
-    lastLlmCall = { provider: "gemini", model: GEMINI_MODEL };
-    const model = client.getGenerativeModel({
-      model: GEMINI_MODEL,
-      systemInstruction: params.system,
-      generationConfig: {
-        maxOutputTokens: params.maxTokens ?? 4096,
-        ...(params.jsonMode || params.responseSchema
-          ? {
-              responseMimeType: "application/json" as const,
-              ...(params.responseSchema
-                ? { responseSchema: params.responseSchema }
-                : {}),
-            }
-          : {}),
-      },
-    });
-    const result = await model.generateContent(params.user);
-    return result.response.text() ?? "";
-  } catch (err) {
-    if (isGeminiQuotaError(err)) {
-      markGeminiQuotaIfNeeded(err);
-      throw new Error(
-        "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 Groq API 키를 추가하세요.",
-      );
-    }
-    if (isGeminiModelMissingError(err)) {
-      console.warn(`[llm] Gemini model unavailable: ${GEMINI_MODEL}`, err);
-    }
-    throw err;
-  }
+  lastLlmCall = { provider: "gemini", model: modelName };
+  const model = client.getGenerativeModel({
+    model: modelName,
+    systemInstruction: params.system,
+    generationConfig: {
+      maxOutputTokens: params.maxTokens ?? 4096,
+      ...(params.jsonMode || params.responseSchema
+        ? {
+            responseMimeType: "application/json" as const,
+            ...(params.responseSchema
+              ? { responseSchema: params.responseSchema }
+              : {}),
+          }
+        : {}),
+    },
+  });
+  const result = await model.generateContent(params.user);
+  return result.response.text() ?? "";
 }
 
 export async function llmText(params: {
   system: string;
   user: string;
   maxTokens?: number;
+  stage?: string;
   /** quality면 Gemini 우선(한국어 문장), 기본 fast는 Groq 우선 */
   route?: LlmRoute;
 }): Promise<string> {
-  return withProviderFallback(
-    "text",
-    () => runPrimaryText(params),
-    () => runGeminiText(params),
+  return executeRoute(
     params.route ?? "fast",
+    () => runPrimaryText(params),
+    (model) => runGeminiText({ ...params, model }),
+    {
+      stage: params.stage,
+      inputChars: params.system.length + params.user.length,
+      maxTokens: params.maxTokens ?? 4096,
+    },
   );
 }
 
@@ -442,6 +363,7 @@ async function repairJsonText(
   maxTokens?: number,
   preferGemini?: boolean,
   responseSchema?: ResponseSchema,
+  geminiModel?: string,
 ): Promise<string> {
   const system =
     "You repair malformed JSON. Output valid JSON only. No markdown fences, no commentary.";
@@ -454,6 +376,7 @@ async function repairJsonText(
           maxTokens: maxTokens ?? 4096,
           jsonMode: true,
           responseSchema,
+          model: geminiModel,
         })
       : runPrimaryText({
           system,
@@ -488,6 +411,7 @@ async function completeJson<T>(params: {
   user: string;
   maxTokens?: number;
   useGemini: boolean;
+  geminiModel?: string;
   responseSchema?: ResponseSchema;
 }): Promise<T> {
   const system = `${params.system}\n\nRespond with valid JSON only. No markdown fences.`;
@@ -498,6 +422,7 @@ async function completeJson<T>(params: {
         maxTokens: params.maxTokens,
         jsonMode: true,
         responseSchema: params.responseSchema,
+        model: params.geminiModel,
       })
     : await runPrimaryText({
         system,
@@ -515,6 +440,7 @@ async function completeJson<T>(params: {
       params.maxTokens,
       params.useGemini || !getPrimaryChat(),
       params.responseSchema,
+      params.geminiModel,
     );
     return parseLlmJson<T>(repaired);
   }
@@ -524,12 +450,13 @@ export async function llmJson<T>(params: {
   system: string;
   user: string;
   maxTokens?: number;
+  stage?: string;
   responseSchema?: ResponseSchema;
   /** quality면 Gemini 우선(한국어 문장), 기본 fast는 Groq 우선 */
   route?: LlmRoute;
 }): Promise<T> {
-  return withProviderFallback(
-    "json",
+  return executeRoute(
+    params.route ?? "fast",
     () =>
       completeJson<T>({
         system: params.system,
@@ -538,15 +465,20 @@ export async function llmJson<T>(params: {
         useGemini: false,
         responseSchema: params.responseSchema,
       }),
-    () =>
+    (model) =>
       completeJson<T>({
         system: params.system,
         user: params.user,
         maxTokens: params.maxTokens,
         useGemini: true,
+        geminiModel: model,
         responseSchema: params.responseSchema,
       }),
-    params.route ?? "fast",
+    {
+      stage: params.stage,
+      inputChars: params.system.length + params.user.length,
+      maxTokens: params.maxTokens ?? 4096,
+    },
   );
 }
 
@@ -558,41 +490,29 @@ async function runGeminiVision(params: {
   mediaType: MediaType;
   base64: string;
   maxTokens?: number;
+  model: string;
 }): Promise<string> {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
 
-  try {
-    lastLlmCall = { provider: "gemini", model: GEMINI_MODEL };
-    const model = client.getGenerativeModel({
-      model: GEMINI_MODEL,
-      systemInstruction: params.system,
-      generationConfig: {
-        maxOutputTokens: params.maxTokens ?? 4096,
+  lastLlmCall = { provider: "gemini", model: params.model };
+  const model = client.getGenerativeModel({
+    model: params.model,
+    systemInstruction: params.system,
+    generationConfig: {
+      maxOutputTokens: params.maxTokens ?? 4096,
+    },
+  });
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType: params.mediaType,
+        data: params.base64,
       },
-    });
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          mimeType: params.mediaType,
-          data: params.base64,
-        },
-      },
-      { text: params.user },
-    ]);
-    return result.response.text() ?? "";
-  } catch (err) {
-    if (isGeminiQuotaError(err)) {
-      markGeminiQuotaIfNeeded(err);
-      throw new Error(
-        "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하세요.",
-      );
-    }
-    if (isGeminiModelMissingError(err)) {
-      console.warn(`[llm] Gemini vision model unavailable: ${GEMINI_MODEL}`, err);
-    }
-    throw err;
-  }
+    },
+    { text: params.user },
+  ]);
+  return result.response.text() ?? "";
 }
 
 /** 이미지 OCR은 Gemini 무료 Vision 우선 (Groq는 텍스트 위주) */
@@ -603,15 +523,31 @@ export async function llmVisionText(params: {
   base64: string;
   maxTokens?: number;
 }): Promise<string> {
-  if (getGemini()) {
-    try {
-      return await runGeminiVision(params);
-    } catch (err) {
-      markGeminiQuotaIfNeeded(err);
-      throw new Error(formatProviderError(undefined, err));
-    }
+  if (!getGemini()) {
+    throw new Error(
+      "이미지 분석에는 GEMINI_API_KEY가 필요합니다. (무료 AI Studio 키)",
+    );
   }
-  throw new Error(
-    "이미지 분석에는 GEMINI_API_KEY가 필요합니다. (무료 AI Studio 키)",
-  );
+  const steps = buildRouteChain({
+    route: "quality",
+    geminiPrimary: GEMINI_MODEL,
+    includeGroq: false,
+    includeGemini: !isProviderSkipped("gemini"),
+  });
+  if (!steps.length) throw new Error(USER_LLM_BUSY);
+  try {
+    return await runProviderChain({
+      steps,
+      stage: "vision",
+      inputChars: params.system.length + params.user.length,
+      maxTokens: params.maxTokens ?? 4096,
+      run: (step) =>
+        runGeminiVision({
+          ...params,
+          model: step.model,
+        }),
+    });
+  } catch {
+    throw new Error(USER_LLM_BUSY);
+  }
 }

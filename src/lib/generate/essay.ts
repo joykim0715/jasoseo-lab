@@ -206,6 +206,7 @@ async function draftOne(params: {
 
   const result = await llmJson<DraftPayload>({
     route: "quality",
+    stage: "draft",
     system: `${DRAFT_SYSTEM}${freeFormHint}`,
     responseSchema: DRAFT_OUTPUT_SCHEMA,
     user: JSON.stringify({
@@ -284,6 +285,7 @@ async function reviseDraft(params: {
 
   const result = await llmJson<DraftPayload>({
     route: "quality",
+    stage: "revise",
     system: `한국어 자소서 부분 수정기입니다.
 ${KOREAN_ONLY_RULE}
 처음부터 새로 쓰지 않는다. 좋은 문장·사실·수치는 유지하고, 아래 issue만 고친다.

@@ -154,6 +154,7 @@ export async function analyzeQuestionIntents(params: {
   try {
     const parsed = await llmJson<{ intents: Partial<QuestionIntent>[] }>({
       route: "fast",
+      stage: "intent",
       system: `You analyze Korean job-application essay questions in one pass.
 For each question return questionId (copy exactly), questionType
 (collaboration|growth|personality|motivation|competency|aspiration|general),

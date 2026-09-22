@@ -3,6 +3,7 @@ import { z } from "zod";
 import { generateEssays } from "@/lib/generate/essay";
 import { normalizeFreeFormQuestions } from "@/lib/generate/freeForm";
 import { jobSchema, setupSchema } from "@/lib/generate/schemas";
+import { runWithLlmRequest, toUserLlmError } from "@/lib/llmResilience";
 import { loadCandidateProfile } from "@/lib/profile/loadProfile";
 import type { JobPosting, SetupConfig } from "@/lib/types";
 
@@ -34,7 +35,9 @@ export async function POST(req: NextRequest) {
     }
 
     const { profile } = await loadCandidateProfile();
-    const result = await generateEssays({ profile, job, setup });
+    const result = await runWithLlmRequest(() =>
+      generateEssays({ profile, job, setup }),
+    );
     return NextResponse.json({ result });
   } catch (err) {
     if (err instanceof z.ZodError) {
@@ -46,8 +49,10 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-    const message =
-      err instanceof Error ? err.message : "자소서 생성에 실패했습니다.";
+    const message = toUserLlmError(
+      err,
+      err instanceof Error ? err.message : "자소서 생성에 실패했습니다.",
+    );
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

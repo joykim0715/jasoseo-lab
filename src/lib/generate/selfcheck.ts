@@ -8,6 +8,7 @@ import { buildEssayPlan } from "./plan";
 import { previousResultSchema } from "./schemas";
 import { retrieveEssaysForQuestion } from "./retrieveEssays";
 import { clampProvenance, validateEssay } from "./validateEssay";
+import { runLlmResilienceSelfCheck } from "../llmResilience";
 import { snapshotToEpisodes } from "../profile/loadProfile";
 import {
   canonicalGroupId,
@@ -115,7 +116,7 @@ function realProfile(): { profile: CandidateProfile; master: FactMaster } {
   };
 }
 
-export function runEngine20SelfCheck() {
+export async function runEngine20SelfCheck() {
   const qA = normalizeFreeFormQuestions();
   const qB = normalizeFreeFormQuestions(qA);
   assert(qA.length === 5, "freeform length");
@@ -745,6 +746,9 @@ export function runEngine20SelfCheck() {
   assert(legacy2.answers[0].validation === undefined, "legacy answer has no validation field");
   assert(legacy2.answers[0].usedFactIds === undefined, "legacy usedFactIds optional");
 
+  const llmRes = await runLlmResilienceSelfCheck();
+  assert(llmRes === "ok", "llm resilience");
+
   return "ok";
 }
 
@@ -822,6 +826,13 @@ export function dumpPlanCases(): string {
 
 const invoked = process.argv[1]?.replace(/\\/g, "/").endsWith("/selfcheck.ts");
 if (invoked) {
-  console.log(runEngine20SelfCheck());
-  console.log(dumpPlanCases());
+  runEngine20SelfCheck()
+    .then((r) => {
+      console.log(r);
+      console.log(dumpPlanCases());
+    })
+    .catch((err) => {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    });
 }
