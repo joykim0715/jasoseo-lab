@@ -53,6 +53,17 @@ async function queryAll(databaseOrDataSourceId: string): Promise<NotionPage[]> {
     }));
 }
 
+function asReferenceType(
+  raw?: string,
+): EssayArchiveItem["referenceType"] {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (["baseline", "기준", "기준본"].includes(t)) return "baseline";
+  if (["final", "제출", "최종"].includes(t)) return "final";
+  if (["draft", "초안"].includes(t)) return "draft";
+  if (["reference", "참고"].includes(t)) return "reference";
+  return undefined;
+}
+
 export async function loadNotionExperiences(): Promise<ExperienceEpisode[]> {
   const dbId = process.env.NOTION_EXPERIENCE_DB_ID;
   if (!dbId || !getNotionClient()) return [];
@@ -109,6 +120,11 @@ export async function loadNotionEssays(): Promise<EssayArchiveItem[]> {
         charCount: number(props.CharCount),
         tone: select(props.Tone),
         rating: select(props.Rating),
+        referenceType: asReferenceType(
+          select(props.ReferenceType) ||
+            select(props.Type) ||
+            select(props.Reference),
+        ),
       };
     });
   } catch (err) {

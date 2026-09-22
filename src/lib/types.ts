@@ -14,8 +14,12 @@ export type ExperienceEpisode = {
   skills: string[];
   portfolioWorkId?: string;
   preferredQuestions: string[];
+  /** 같은 실제 경험을 가리키는 episode끼리 동일 */
+  canonicalGroupId?: string;
   source: "portfolio" | "notion";
 };
+
+export type EssayReferenceType = "baseline" | "final" | "reference" | "draft";
 
 export type EssayArchiveItem = {
   id: string;
@@ -27,6 +31,8 @@ export type EssayArchiveItem = {
   charCount?: number;
   tone?: string;
   rating?: string;
+  /** 없으면 일반 reference. Notion 속성 없어도 앱은 동작 */
+  referenceType?: EssayReferenceType;
 };
 
 export type CandidateProfile = {
@@ -46,6 +52,8 @@ export type CandidateProfile = {
     role?: string;
     metrics: string[];
     tags: string[];
+    /** snapshot experience.id — 같은 실제 경험이면 설정 */
+    experienceId?: string;
   }[];
   certifications: {
     name: string;
@@ -124,6 +132,17 @@ export type HiringPersona = {
   weight: number;
 };
 
+export type EssayValidationIssue = {
+  code: string;
+  severity: "error" | "warning";
+  message: string;
+};
+
+export type EssayValidationResult = {
+  valid: boolean;
+  issues: EssayValidationIssue[];
+};
+
 export type EssayAnswer = {
   questionId: string;
   title: string;
@@ -135,11 +154,72 @@ export type EssayAnswer = {
   withinLimit: boolean;
   constraintNotes: string[];
   usedEpisodeIds: string[];
+  usedFactIds?: string[];
+  retrievedEssayIds?: string[];
+  revised?: boolean;
+  validation?: EssayValidationResult;
 };
 
 export type GenerateResult = {
-  personas: HiringPersona[];
+  /** 기본 생성에서는 비움. 구세션·optional review 호환 */
+  personas?: HiringPersona[];
   answers: EssayAnswer[];
   matchingNotes: string[];
-  personaFeedback: string;
+  personaFeedback?: string;
+  /** engine 2.0 — 구세션에는 없음 */
+  plan?: EssayPlan;
+};
+
+export type FactItem = {
+  id: string;
+  label: string;
+  value: string;
+  category:
+    | "metric"
+    | "role"
+    | "period"
+    | "education"
+    | "certification"
+    | "skill"
+    | "other";
+  episodeId?: string;
+  source: string;
+  status: "locked" | "reference" | "disabled";
+  tags?: string[];
+  preferredQuestionTypes?: string[];
+};
+
+export type FactMaster = {
+  version: number;
+  facts: FactItem[];
+};
+
+export type QuestionIntent = {
+  questionId: string;
+  questionType: string;
+  goals: string[];
+  evidencePriorities: string[];
+  jdSignals: string[];
+  avoid: string[];
+};
+
+export type EpisodeCandidate = {
+  episodeId: string;
+  score: number;
+  reasons: string[];
+};
+
+export type EssayPlanItem = {
+  questionId: string;
+  intent: QuestionIntent;
+  primaryEpisodeId?: string;
+  secondaryEpisodeId?: string;
+  allowedFactIds: string[];
+  targetJdSignals: string[];
+  thesis: string;
+  notes: string[];
+};
+
+export type EssayPlan = {
+  items: EssayPlanItem[];
 };

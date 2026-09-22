@@ -6,18 +6,20 @@ import {
 } from "@google/generative-ai";
 
 /** 무료 메인: Groq (OpenAI 호환 API) */
-const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+export const GROQ_MODEL =
+  process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 /** 유료 옵션(선택): OpenAI */
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+/** 한국어 문장: Gemini. 구형 flash로 조용히 내려가지 않음 */
+export const GEMINI_MODEL =
+  process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
 
-const GEMINI_MODEL_CANDIDATES = [
-  process.env.GEMINI_MODEL,
-  "gemini-3.5-flash",
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
+let lastLlmCall: { provider: "groq" | "openai" | "gemini"; model: string } | null =
+  null;
 
-let resolvedGeminiModel: string | null = null;
+export function getLastLlmCall() {
+  return lastLlmCall;
+}
 
 let groq: OpenAI | null = null;
 let openai: OpenAI | null = null;
@@ -350,6 +352,7 @@ async function runPrimaryText(params: {
   const primary = getPrimaryChat();
   if (!primary) throw new Error("GROQ_API_KEY 또는 OPENAI_API_KEY 없음");
   try {
+    lastLlmCall = { provider: primary.name, model: primary.model };
     const res = await primary.client.chat.completions.create({
       model: primary.model,
       max_tokens: params.maxTokens ?? 4096,
@@ -386,53 +389,37 @@ async function runGeminiText(params: {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
 
-  const models = resolvedGeminiModel
-    ? [
-        resolvedGeminiModel,
-        ...GEMINI_MODEL_CANDIDATES.filter((m) => m !== resolvedGeminiModel),
-      ]
-    : GEMINI_MODEL_CANDIDATES;
-
-  let lastErr: unknown;
-  for (const modelName of models) {
-    try {
-      const model = client.getGenerativeModel({
-        model: modelName,
-        systemInstruction: params.system,
-        generationConfig: {
-          maxOutputTokens: params.maxTokens ?? 4096,
-          ...(params.jsonMode || params.responseSchema
-            ? {
-                responseMimeType: "application/json" as const,
-                ...(params.responseSchema
-                  ? { responseSchema: params.responseSchema }
-                  : {}),
-              }
-            : {}),
-        },
-      });
-      const result = await model.generateContent(params.user);
-      resolvedGeminiModel = modelName;
-      return result.response.text() ?? "";
-    } catch (err) {
-      lastErr = err;
-      if (isGeminiQuotaError(err)) {
-        markGeminiQuotaIfNeeded(err);
-        throw new Error(
-          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 Groq API 키를 추가하세요.",
-        );
-      }
-      if (isGeminiModelMissingError(err)) {
-        console.warn(`[llm] Gemini model unavailable: ${modelName}`, err);
-        if (resolvedGeminiModel === modelName) resolvedGeminiModel = null;
-        continue;
-      }
-      throw err;
+  try {
+    lastLlmCall = { provider: "gemini", model: GEMINI_MODEL };
+    const model = client.getGenerativeModel({
+      model: GEMINI_MODEL,
+      systemInstruction: params.system,
+      generationConfig: {
+        maxOutputTokens: params.maxTokens ?? 4096,
+        ...(params.jsonMode || params.responseSchema
+          ? {
+              responseMimeType: "application/json" as const,
+              ...(params.responseSchema
+                ? { responseSchema: params.responseSchema }
+                : {}),
+            }
+          : {}),
+      },
+    });
+    const result = await model.generateContent(params.user);
+    return result.response.text() ?? "";
+  } catch (err) {
+    if (isGeminiQuotaError(err)) {
+      markGeminiQuotaIfNeeded(err);
+      throw new Error(
+        "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하거나 Groq API 키를 추가하세요.",
+      );
     }
+    if (isGeminiModelMissingError(err)) {
+      console.warn(`[llm] Gemini model unavailable: ${GEMINI_MODEL}`, err);
+    }
+    throw err;
   }
-  throw lastErr instanceof Error
-    ? lastErr
-    : new Error("사용 가능한 Gemini 모델이 없습니다.");
 }
 
 export async function llmText(params: {
@@ -575,53 +562,37 @@ async function runGeminiVision(params: {
   const client = getGemini();
   if (!client) throw new Error("GEMINI_API_KEY 없음");
 
-  const models = resolvedGeminiModel
-    ? [
-        resolvedGeminiModel,
-        ...GEMINI_MODEL_CANDIDATES.filter((m) => m !== resolvedGeminiModel),
-      ]
-    : GEMINI_MODEL_CANDIDATES;
-
-  let lastErr: unknown;
-  for (const modelName of models) {
-    try {
-      const model = client.getGenerativeModel({
-        model: modelName,
-        systemInstruction: params.system,
-        generationConfig: {
-          maxOutputTokens: params.maxTokens ?? 4096,
+  try {
+    lastLlmCall = { provider: "gemini", model: GEMINI_MODEL };
+    const model = client.getGenerativeModel({
+      model: GEMINI_MODEL,
+      systemInstruction: params.system,
+      generationConfig: {
+        maxOutputTokens: params.maxTokens ?? 4096,
+      },
+    });
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType: params.mediaType,
+          data: params.base64,
         },
-      });
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            mimeType: params.mediaType,
-            data: params.base64,
-          },
-        },
-        { text: params.user },
-      ]);
-      resolvedGeminiModel = modelName;
-      return result.response.text() ?? "";
-    } catch (err) {
-      lastErr = err;
-      if (isGeminiQuotaError(err)) {
-        markGeminiQuotaIfNeeded(err);
-        throw new Error(
-          "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하세요.",
-        );
-      }
-      if (isGeminiModelMissingError(err)) {
-        console.warn(`[llm] Gemini vision model unavailable: ${modelName}`, err);
-        if (resolvedGeminiModel === modelName) resolvedGeminiModel = null;
-        continue;
-      }
-      throw err;
+      },
+      { text: params.user },
+    ]);
+    return result.response.text() ?? "";
+  } catch (err) {
+    if (isGeminiQuotaError(err)) {
+      markGeminiQuotaIfNeeded(err);
+      throw new Error(
+        "Gemini API 요청 한도(429)를 초과했습니다. 잠시 후 다시 시도하세요.",
+      );
     }
+    if (isGeminiModelMissingError(err)) {
+      console.warn(`[llm] Gemini vision model unavailable: ${GEMINI_MODEL}`, err);
+    }
+    throw err;
   }
-  throw lastErr instanceof Error
-    ? lastErr
-    : new Error("사용 가능한 Gemini 모델이 없습니다.");
 }
 
 /** 이미지 OCR은 Gemini 무료 Vision 우선 (Groq는 텍스트 위주) */

@@ -29,7 +29,7 @@ const PERSONA_SCHEMA = {
   required: ["personas"],
 } as ResponseSchema;
 
-function defaultPersonas(job: JobPosting): HiringPersona[] {
+export function defaultPersonas(job: JobPosting): HiringPersona[] {
   const role = job.role && job.role !== "미상" ? job.role : "해당 포지션";
   const company =
     job.company && job.company !== "미상" ? job.company : "지원 기업";

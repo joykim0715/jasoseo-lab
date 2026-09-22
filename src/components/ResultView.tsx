@@ -132,7 +132,7 @@ export function ResultView() {
             ) : result ? (
               "전체 다시 생성"
             ) : (
-              "페르소나 분석 후 생성"
+              "생성"
             )}
           </button>
         </div>
@@ -161,7 +161,7 @@ export function ResultView() {
               onClick={() => setShowPersonas((v) => !v)}
               className="text-sm text-[var(--accent)] underline-offset-4 hover:underline"
             >
-              {showPersonas ? "페르소나 접기" : "페르소나·매칭 보기"}
+              {showPersonas ? "페르소나·계획 접기" : "페르소나·매칭·계획 보기"}
             </button>
           </div>
 
@@ -178,6 +178,21 @@ export function ResultView() {
                   ))}
                 </ul>
               </div>
+              {result.plan?.items?.length ? (
+                <div>
+                  <p className="mb-1 font-medium">문항별 소재 계획</p>
+                  <ul className="space-y-2 text-[var(--muted)]">
+                    {result.plan.items.map((item) => (
+                      <li key={item.questionId}>
+                        <span className="text-[var(--ink)]">{item.thesis}</span>
+                        {item.notes.length > 0 && (
+                          <span> — {item.notes.join(" / ")}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
           )}
 
@@ -200,6 +215,13 @@ export function ResultView() {
                         <span className="ml-2 text-[var(--danger)]">제한 초과</span>
                       )}
                     </p>
+                    {result.plan?.items?.find((i) => i.questionId === a.questionId) && (
+                      <p className="mt-1 text-sm text-[var(--muted)]">
+                        {result.plan.items
+                          .find((i) => i.questionId === a.questionId)
+                          ?.notes.join(" · ")}
+                      </p>
+                    )}
                   </div>
                   <div className="flex gap-2">
                     <CopyButton text={a.body} label="문항 복사" />
@@ -242,8 +264,7 @@ export function ResultView() {
             초안을 만들 준비가 됐습니다
           </p>
           <p className="mx-auto mt-2 max-w-md text-sm text-[var(--muted)]">
-            JD 기반 다중 페르소나를 세우고, 포트폴리오·경험 뱅크에 맞춰 문항별
-            초안을 생성합니다.
+            JD와 경험 소재에 맞춰 문항별 초안을 생성합니다.
           </p>
         </div>
       )}

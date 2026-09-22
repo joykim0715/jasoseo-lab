@@ -5,7 +5,7 @@ import type { CandidateProfile, ExperienceEpisode } from "../types";
 import { loadNotionEssays, loadNotionExperiences } from "../notion/loadExperiences";
 import { notionConfigured } from "../notion/client";
 
-type Snapshot = {
+export type Snapshot = {
   name: string;
   tagline: string;
   bio: string;
@@ -33,7 +33,24 @@ async function readSnapshot(): Promise<Snapshot> {
   return JSON.parse(raw) as Snapshot;
 }
 
-function snapshotToEpisodes(snap: Snapshot): ExperienceEpisode[] {
+/** 기준정보 경험 카드 ↔ 문항 유형. Notion preferredQuestions가 있으면 그쪽이 이김. */
+const SNAPSHOT_PREFERRED: Record<string, string[]> = {
+  "homecare-researcher": ["직무역량", "경험", "competency", "지원동기"],
+  "work-01": ["직무역량", "경험", "competency"],
+  "work-02": ["지원동기", "직무역량", "motivation", "competency"],
+  "work-03": ["성격", "장단점", "personality", "협업", "collaboration"],
+  "work-04": ["지원동기", "직무역량", "motivation", "competency"],
+  "work-05": ["직무역량", "성장과정", "competency", "growth"],
+  floorball: [
+    "성장과정",
+    "growth",
+    "협업",
+    "collaboration",
+    "팀워크",
+  ],
+};
+
+export function snapshotToEpisodes(snap: Snapshot): ExperienceEpisode[] {
   const fromExp = snap.experiences.map((e) => ({
     id: e.id,
     title: `${e.organization} · ${e.role}`,
@@ -43,7 +60,8 @@ function snapshotToEpisodes(snap: Snapshot): ExperienceEpisode[] {
     highlights: e.highlights,
     tags: e.tags,
     skills: [],
-    preferredQuestions: [],
+    preferredQuestions: SNAPSHOT_PREFERRED[e.id] ?? [],
+    canonicalGroupId: e.id,
     source: "portfolio" as const,
   }));
 
@@ -55,8 +73,9 @@ function snapshotToEpisodes(snap: Snapshot): ExperienceEpisode[] {
     tags: w.tags,
     skills: w.tags,
     portfolioWorkId: w.id,
-    preferredQuestions: [],
+    preferredQuestions: SNAPSHOT_PREFERRED[`work-${w.id}`] ?? [],
     metrics: w.metrics.join(", "),
+    canonicalGroupId: w.experienceId ?? `work-${w.id}`,
     source: "portfolio" as const,
   }));
 

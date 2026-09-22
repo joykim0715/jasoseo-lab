@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "source": "applications/_취업프로젝트_기준정보.md (2026-09-17)",
+  "facts": [
+    {
+      "id": "fact-name",
+      "label": "이름",
+      "value": "김인홍",
+      "category": "other",
+      "source": "기준정보 §1",
+      "status": "locked",
+      "tags": ["이름"],
+      "preferredQuestionTypes": []
+    },
+    {
+      "id": "fact-education",
+      "label": "학력",
+      "value": "성균관대학교 스포츠과학부 원전공 + 국제통상학과 복수전공 (2020 ~ 2025.08 졸업)",
+      "category": "education",
+      "source": "기준정보 §1",
+      "status": "locked",
+      "tags": ["학력", "전공", "스포츠과학", "국제통상"],
+      "preferredQuestionTypes": ["motivation", "growth", "competency"]
+    },
+    {
+      "id": "fact-trade-courses",
+      "label": "국제통상 확인 이수과목",
+      "value": "경제학원론, 거시경제학, 마케팅관리",
+      "category": "education",
+      "source": "기준정보 §1 (2026-09-11)",
+      "status": "locked",
+      "tags": ["경제학", "마케팅", "통상"],
+      "preferredQuestionTypes": ["motivation", "competency"]
+    },
+    {
+      "id": "fact-role-homecare",
+      "label": "경력",
+      "value": "가천대학교 메디컬캠퍼스 산학협력단 시니어 헬스케어 국책과제 연구원 (계약직, 2025.03 ~ 2026.02, 실무 1년)",
+      "category": "role",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §1",
+      "status": "locked"
+    },
+    {
+      "id": "fact-period-homecare",
+      "label": "국책과제 기간",
+      "value": "2025.03 ~ 2026.02",
+      "category": "period",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §1",
+      "status": "locked"
+    },
+    {
+      "id": "fact-portfolio-url",
+      "label": "포트폴리오",
+      "value": "https://kiminhong-portfolio.vercel.app",
+      "category": "other",
+      "source": "기준정보 §1",
+      "status": "locked",
+      "tags": ["포트폴리오"],
+      "preferredQuestionTypes": []
+    },
+    {
+      "id": "fact-opic",
+      "label": "OPIc",
+      "value": "Intermediate High (2025.08). 어학은 OPIc만 기재",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["OPIc", "영어", "어학"],
+      "preferredQuestionTypes": ["motivation", "competency"]
+    },
+    {
+      "id": "fact-adsp",
+      "label": "ADsP",
+      "value": "데이터분석 준전문가 (2026.06.05)",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["ADsP", "데이터", "SQL"],
+      "preferredQuestionTypes": ["competency"]
+    },
+    {
+      "id": "fact-ga",
+      "label": "Google Analytics 인증",
+      "value": "Google (2026.02.03)",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["Analytics", "GA"],
+      "preferredQuestionTypes": ["competency"]
+    },
+    {
+      "id": "fact-aipot",
+      "label": "AI-POT 2급",
+      "value": "AI 프롬프트 활용능력, KPC (2026.04.30)",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["AI", "프롬프트", "MCP"],
+      "preferredQuestionTypes": ["competency"]
+    },
+    {
+      "id": "fact-aibt",
+      "label": "AIBT 2급",
+      "value": "AI 비즈니스 활용, KPC (2026.04.02)",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["AI", "비즈니스"],
+      "preferredQuestionTypes": ["competency"]
+    },
+    {
+      "id": "fact-smarthome",
+      "label": "스마트홈 헬스케어 지도사 2급",
+      "value": "KSHA (2025.11.14)",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["헬스케어", "시니어", "스마트홈"],
+      "preferredQuestionTypes": ["competency", "motivation"]
+    },
+    {
+      "id": "fact-poster-award",
+      "label": "우수 포스터상",
+      "value": "2025 추계 한국운동재활학회 (2025.11)",
+      "category": "other",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["학회", "포스터"],
+      "preferredQuestionTypes": ["competency", "growth"]
+    },
+    {
+      "id": "fact-skills",
+      "label": "스킬",
+      "value": "SQL(MySQL), SPSS, Excel, Figma, 대시보드 설계, Google Analytics, 생성형 AI, MCP 자동화, 바이브코딩",
+      "category": "skill",
+      "source": "기준정보 §2",
+      "status": "locked",
+      "tags": ["SQL", "MySQL", "SPSS", "Excel", "Figma", "MCP"],
+      "preferredQuestionTypes": ["competency"]
+    },
+    {
+      "id": "fact-metric-recruit",
+      "label": "국책과제 모집·참여",
+      "value": "모집 대상 224명 → 참여 150명(67%)",
+      "category": "metric",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §3",
+      "status": "locked"
+    },
+    {
+      "id": "fact-metric-retention",
+      "label": "리텐션",
+      "value": "83% (참여자 기준)",
+      "category": "metric",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §3",
+      "status": "locked"
+    },
+    {
+      "id": "fact-metric-logs",
+      "label": "로그 데이터",
+      "value": "6.9만 건 (스마트링·워치), SQL+SPSS 전처리, 유효 데이터 85%",
+      "category": "metric",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §3",
+      "status": "locked"
+    },
+    {
+      "id": "fact-metric-blackout",
+      "label": "고위험군 기준",
+      "value": "3일 연속 데이터 결측 / 3단계 온보딩 가이드",
+      "category": "metric",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §3",
+      "status": "locked"
+    },
+    {
+      "id": "fact-metric-mou",
+      "label": "MOU·계약·데이터 활용",
+      "value": "MOU·서비스 계약 5건 의사결정 지원 / 사내 데이터 활용률 +25%p",
+      "category": "metric",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §3",
+      "status": "locked"
+    },
+    {
+      "id": "fact-metric-partnership",
+      "label": "학생회 기업 제휴",
+      "value": "재학생 설문 200명 → 제휴 물량 전년 대비 +30%",
+      "category": "metric",
+      "episodeId": "work-04",
+      "source": "기준정보 §3",
+      "status": "locked"
+    },
+    {
+      "id": "fact-metric-floorball",
+      "label": "플로어볼",
+      "value": "훈련 영상 100시간+ 프레임 분석, 슈팅 성공률 64% → 75%, 국가대표 선발전 도전(선발 실패), 2024 전국대학선수권 우승, 동아리 바스타즈 주장",
+      "category": "metric",
+      "episodeId": "floorball",
+      "source": "기준정보 §3·§4",
+      "status": "locked",
+      "tags": ["플로어볼", "성장", "팀", "스포츠"],
+      "preferredQuestionTypes": ["growth", "collaboration"]
+    },
+    {
+      "id": "fact-metric-library",
+      "label": "총학생회 도서관 리모델링",
+      "value": "재학생 800명 설문, 최종 만족도 87%",
+      "category": "metric",
+      "episodeId": "work-03",
+      "source": "기준정보 §4 활동 목록",
+      "status": "locked"
+    },
+    {
+      "id": "fact-lifenology",
+      "label": "라이프놀로지랩",
+      "value": "SKKU-삼성생명 1기, 2024.10~2025.01, 팀원. fNIRS 웨어러블 링 + 앱 de:light 기획, Figma 프로토타입. 출시·운영 아님. 슬로건 '보험을 넘어서는 보험'",
+      "category": "role",
+      "episodeId": "work-02",
+      "source": "기준정보 §4",
+      "status": "locked"
+    },
+    {
+      "id": "fact-cognitive-eval",
+      "label": "국책과제 인지평가",
+      "value": "65세 이상 생체역학·인지기능 평가 참여. MMSE·SMCQ는 교육 후 직접 시행. MoCA·CERAD-K는 참여만. 평가 도구 자격 취득 아님",
+      "category": "other",
+      "episodeId": "homecare-researcher",
+      "source": "기준정보 §2",
+      "status": "locked"
+    },
+    {
+      "id": "fact-weakness",
+      "label": "약점 서사",
+      "value": "최선의 답을 찾으려는 성향 → 초기 단계 길어짐 → 결측치 보정 집착으로 보고 시점 임박 → 초안 마감 선정 + 80% 중간 공유 습관화",
+      "category": "other",
+      "source": "기준정보 §4",
+      "status": "locked",
+      "tags": ["약점", "단점", "성격", "장단점"],
+      "preferredQuestionTypes": ["personality"]
+    },
+    {
+      "id": "fact-kukdae",
+      "label": "국대스마터즈 1기",
+      "value": "2022-07 ~ 2022-12, 수영 종목 활성화 개인화 콘텐츠·숏폼 기획, 플랫폼별 반응 분석",
+      "category": "role",
+      "episodeId": "work-05",
+      "source": "기준정보 §4",
+      "status": "locked"
+    },
+    {
+      "id": "fact-toeic",
+      "label": "TOEIC",
+      "value": "850점 — 기준정보는 어학 OPIc만 기재(점수 낮아 미기재). 스냅샷 certifications에는 있음",
+      "category": "certification",
+      "source": "기준정보 §2 vs profile.snapshot.json",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-bigdata-aice",
+      "label": "빅데이터분석기사·AICE",
+      "value": "미취득. 취득했다고 쓰지 말 것. 준비 중은 본인 확인 후",
+      "category": "certification",
+      "source": "기준정보 §2",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-no-insurance-apps",
+      "label": "보험 앱 사용 경험",
+      "value": "보험 앱·모니모·더헬스 사용 경험으로 말하지 않음",
+      "category": "other",
+      "source": "기준정보 §1",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-no-survey-55",
+      "label": "라이프놀로지 사용자 조사 55명",
+      "value": "타 모델 발언, 미확인, 미사용",
+      "category": "metric",
+      "episodeId": "work-02",
+      "source": "기준정보 §4",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-no-lifenology-feedback-quote",
+      "label": "라이프놀로지 피드백 내용",
+      "value": "피드백 요지 기억 안 남 → 인용 금지",
+      "category": "other",
+      "episodeId": "work-02",
+      "source": "기준정보 §4",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-no-visit-count",
+      "label": "포트폴리오 방문 카운트",
+      "value": "바이브코딩 산출물. 채널 데이터 운영 경험으로 쓰지 않음",
+      "category": "other",
+      "source": "기준정보 §1",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-no-driving",
+      "label": "운전",
+      "value": "면허·자차 없음. 자소서에 변명하거나 언급하지 않음",
+      "category": "other",
+      "source": "기준정보 §1",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-military",
+      "label": "병역",
+      "value": "면제. 자소서 본문에는 쓰지 않고 이력서 병역 칸에만",
+      "category": "other",
+      "source": "기준정보 §1",
+      "status": "disabled"
+    },
+    {
+      "id": "fact-looker-studio",
+      "label": "Looker Studio",
+      "value": "스냅샷 Visualization tools에 있음. 기준정보 스킬 목록에는 Figma·대시보드만 명시",
+      "category": "skill",
+      "source": "profile.snapshot.json vs 기준정보 §2",
+      "status": "reference"
+    },
+    {
+      "id": "fact-taekwondo",
+      "label": "신성태권도 미금점 보조사범",
+      "value": "2023.04 ~ 2023.12, 아르바이트. 스냅샷에만 있고 기준정보 경험 카드에는 없음",
+      "category": "role",
+      "episodeId": "taekwondo-assistant",
+      "source": "profile.snapshot.json",
+      "status": "reference"
+    },
+    {
+      "id": "fact-fitness-cs",
+      "label": "mvm휘트니스 성복점 CS매니저",
+      "value": "2021.02 ~ 2022.08, 아르바이트. 스냅샷에만 있고 기준정보 경험 카드에는 없음",
+      "category": "role",
+      "episodeId": "fitness-cs",
+      "source": "profile.snapshot.json",
+      "status": "reference"
+    }
+  ]
+}

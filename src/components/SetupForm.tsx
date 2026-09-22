@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { JobSummary } from "./JobSummary";
-import { buildFreeFormQuestions } from "@/lib/generate/freeForm";
+import { normalizeFreeFormQuestions } from "@/lib/generate/freeForm";
 import { loadJob, loadSetup, saveSetup } from "@/lib/session";
 import type {
   EssayQuestion,
@@ -146,7 +146,7 @@ export function SetupForm() {
     let finalQuestions = questions;
 
     if (freeForm) {
-      finalQuestions = buildFreeFormQuestions();
+      finalQuestions = normalizeFreeFormQuestions(questions);
     } else {
       if (!questions.length || questions.some((q) => !q.title.trim())) {
         setError("자소서 문항 구성을 입력해 주세요.");

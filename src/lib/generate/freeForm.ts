@@ -43,17 +43,27 @@ export const FREE_FORM_ITEMS: Omit<EssayQuestion, "id">[] = [
   },
 ];
 
-export function buildFreeFormQuestions(): EssayQuestion[] {
-  return FREE_FORM_ITEMS.map((item) => ({
-    ...item,
-    id: crypto.randomUUID(),
-  }));
+/** 내용의 canonical source는 FREE_FORM_ITEMS. 기존 ID는 index로 유지. */
+export function normalizeFreeFormQuestions(
+  existingQuestions?: EssayQuestion[],
+): EssayQuestion[] {
+  return FREE_FORM_ITEMS.map((item, i) => {
+    const prevId = existingQuestions?.[i]?.id?.trim();
+    return {
+      ...item,
+      id: prevId || `freeform-${i + 1}`,
+    };
+  });
 }
 
-/** 서버(Node)에서도 쓸 수 있는 id 생성 */
-export function buildFreeFormQuestionsServer(): EssayQuestion[] {
-  return FREE_FORM_ITEMS.map((item, i) => ({
-    ...item,
-    id: `freeform-${i + 1}-${Date.now()}`,
-  }));
+export function buildFreeFormQuestions(
+  existingQuestions?: EssayQuestion[],
+): EssayQuestion[] {
+  return normalizeFreeFormQuestions(existingQuestions);
+}
+
+export function buildFreeFormQuestionsServer(
+  existingQuestions?: EssayQuestion[],
+): EssayQuestion[] {
+  return normalizeFreeFormQuestions(existingQuestions);
 }

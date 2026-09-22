@@ -1,54 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { generateEssays } from "@/lib/generate/essay";
-import { buildFreeFormQuestionsServer } from "@/lib/generate/freeForm";
+import { normalizeFreeFormQuestions } from "@/lib/generate/freeForm";
+import { jobSchema, setupSchema } from "@/lib/generate/schemas";
 import { loadCandidateProfile } from "@/lib/profile/loadProfile";
 import type { JobPosting, SetupConfig } from "@/lib/types";
 
 export const runtime = "nodejs";
 /** 문항 5개 × LLM 다단 호출 — Pro 기준 최대 300초 */
 export const maxDuration = 300;
-
-const questionSchema = z.object({
-  id: z.string().min(1),
-  title: z.string().min(1),
-  prompt: z.string(),
-  charLimit: z.number().int().min(0),
-  countSpaces: z.boolean(),
-});
-
-const setupSchema = z.object({
-  freeForm: z.boolean().optional().default(false),
-  questions: z.array(questionSchema).min(1),
-  constraints: z.object({
-    freeText: z.string(),
-    structureStar: z.boolean(),
-    leadWithPoint: z.boolean(),
-    causalLogic: z.boolean(),
-    jdLink: z.boolean(),
-    smoothFlow: z.boolean(),
-    noRepetition: z.boolean(),
-    blindSchool: z.boolean(),
-    blindCompany: z.boolean(),
-    blindProject: z.boolean(),
-    blindGpa: z.boolean(),
-    blindPersonal: z.boolean(),
-    blindDemographics: z.boolean(),
-  }),
-});
-
-const jobSchema = z.object({
-  company: z.string(),
-  role: z.string(),
-  requirements: z.array(z.string()),
-  preferred: z.array(z.string()),
-  responsibilities: z.array(z.string()),
-  keywords: z.array(z.string()),
-  cultureSignals: z.array(z.string()),
-  essayQuestionsHint: z.array(z.string()).optional(),
-  rawText: z.string(),
-  warnings: z.array(z.string()),
-});
 
 export async function POST(req: NextRequest) {
   try {
@@ -60,7 +20,7 @@ export async function POST(req: NextRequest) {
       setup = {
         ...setup,
         freeForm: true,
-        questions: buildFreeFormQuestionsServer(),
+        questions: normalizeFreeFormQuestions(setup.questions),
       };
     } else {
       for (const q of setup.questions) {

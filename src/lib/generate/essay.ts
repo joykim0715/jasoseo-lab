@@ -1,13 +1,30 @@
-import { llmJson, llmText, SchemaType, type ResponseSchema } from "../llm";
-import { countChars, isWithinLimit } from "./charCount";
-import { enforceKoreanOnly, KOREAN_ONLY_RULE } from "./koreanOnly";
-import { selectEpisodes } from "./match";
-import { buildPersonas } from "./personas";
+import {
+  getLastLlmCall,
+  llmJson,
+  SchemaType,
+  type ResponseSchema,
+} from "../llm";
+import { clipToCharLimit, countChars, isWithinLimit } from "./charCount";
+import { collectAllowedTerms, KOREAN_ONLY_RULE } from "./koreanOnly";
+import { rankEpisodesForQuestion } from "./match";
+import { buildEssayPlan } from "./plan";
+import { analyzeQuestionIntents, fallbackIntent } from "./questionIntent";
+import {
+  formatStyleReferencesForDraft,
+  retrieveEssaysForQuestion,
+} from "./retrieveEssays";
+import { clampProvenance, validateEssay } from "./validateEssay";
+import { loadFactMaster } from "../profile/loadFactMaster";
 import type {
   CandidateProfile,
   EssayAnswer,
+  EssayArchiveItem,
+  EssayPlan,
+  EssayPlanItem,
   EssayQuestion,
+  EssayValidationIssue,
   ExperienceEpisode,
+  FactItem,
   GenerateResult,
   HiringPersona,
   JobPosting,
@@ -18,10 +35,10 @@ import type {
 /** 톤·품질 규칙은 항상 적용 (UI에서 고정) */
 const BASE_CONSTRAINTS = [
   KOREAN_ONLY_RULE,
-  "구체적 수치(지표)를 최소 1개 이상 포함",
+  "구체적 수치(지표)를 최소 1개 이상 포함 — 제공된 Fact의 숫자만 사용",
   "지원 회사명·포지션을 자연스럽게 언급",
   "존댓말·격식체 사용",
-  "제공된 경험 외 사실 날조 금지",
+  "제공된 경험·Fact 외 사실 날조 금지",
 ];
 
 function constraintLines(c: WritingConstraints): string[] {
@@ -90,21 +107,6 @@ function constraintLines(c: WritingConstraints): string[] {
   return lines;
 }
 
-function checkConstraints(
-  body: string,
-  _c: WritingConstraints,
-  company: string,
-): string[] {
-  const notes: string[] = [];
-  if (!/\d/.test(body)) {
-    notes.push("수치 포함 권장 조건 미충족");
-  }
-  if (company !== "미상" && !body.includes(company)) {
-    notes.push("회사명 언급 조건 미충족");
-  }
-  return notes;
-}
-
 function formatEpisode(e: ExperienceEpisode): string {
   const parts = [
     `id=${e.id}`,
@@ -124,31 +126,70 @@ function formatEpisode(e: ExperienceEpisode): string {
   return `- ${parts.filter(Boolean).join(" | ")}`;
 }
 
+const DRAFT_OUTPUT_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    body: { type: SchemaType.STRING },
+    usedEpisodeIds: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+    },
+    usedFactIds: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+    },
+  },
+  required: ["body", "usedEpisodeIds", "usedFactIds"],
+} as ResponseSchema;
+
 const DRAFT_SYSTEM = `당신은 국내 대기업·스타트업 합격 자소서를 다수 작성한 한국어 자기소개서 전문 라이터입니다.
 
 ${KOREAN_ONLY_RULE}
 
+역할 분리:
+- Fact source = selected ExperienceEpisode + allowed locked Facts 만.
+- Style source = styleReferences (문체·문단 구조·정보 밀도·두괄식·전환만).
+- Job source = JobPosting (회사 요구. 지원자 보유 사실이 아님).
+- Writing strategy = QuestionIntent + EssayPlan.
+
 작성 원칙:
-1) 제공된 경험·지표만 사용. 없는 사실·수치·직함 날조 금지.
-2) AI 티 나는 상투어 금지. (예: "~에 기여하고자 합니다" 남발, "열정적인", "다양한 경험")
-3) 추상 주장 대신 구체 행동·의사결정·수치·학습을 쓴다.
-4) 문단은 2~4개. 각 문단 역할이 분명해야 한다 (핵심→근거→의미/포지션 연결).
-5) 채용 페르소나의 선호를 반영하고 레드플래그는 피한다.
-6) 존댓말 완결 문장. 복사해 바로 제출 가능한 완성본만 출력.
-7) body에는 문단 구분을 \\n\\n 로 넣는다.
-8) 중국어·일본어·베트남어·영어 문장을 한 글자도 섞지 않는다.
-9) 별도 윤문 없이 바로 제출 가능한 완성도를 한 번에 맞춘다. 상투어·중복을 초안에서 제거한다.`;
+1) 없는 사실·수치·직함 날조 금지. reference/disabled Fact 사용 금지.
+2) AI 티 나는 상투어 금지.
+3) 추상 주장 대신 구체 행동·의사결정·수치·학습.
+4) 문단은 2~4개. body는 \\n\\n 로 문단 구분.
+5) 존댓말 완결 문장. 바로 제출 가능한 완성본만.
+6) 한글만. 허용된 도구·자격 고유명사는 유지.
+7) EssayPlan thesis·지정 경험만 깊게. 제3 경험 금지.
+8) JD의 요구·우대(운전·자격·제품 경험 등)를 지원자 보유 사실로 쓰지 않는다.
+9) styleReferences 안의 회사명·직무명·경험·수치·자격·사실은 현재 답변의 사실 source가 아니다. 문체만 참고한다.`;
+
+type DraftPayload = {
+  body: string;
+  usedEpisodeIds: string[];
+  usedFactIds: string[];
+};
+
+function lockedFacts(facts: FactItem[]): FactItem[] {
+  return facts.filter((f) => {
+    if (f.status === "locked") return true;
+    if (process.env.NODE_ENV !== "production") {
+      console.warn("[draftOne] skipped non-locked fact", f.id, f.status);
+    }
+    return false;
+  });
+}
 
 async function draftOne(params: {
   profile: CandidateProfile;
   job: JobPosting;
   question: EssayQuestion;
-  personas: HiringPersona[];
-  episodesSummary: string;
-  essaySamples: string;
+  planItem: EssayPlanItem;
+  episodes: ExperienceEpisode[];
+  facts: FactItem[];
+  styleReferences: EssayArchiveItem[];
   constraints: WritingConstraints;
   freeForm: boolean;
-}): Promise<{ body: string; usedEpisodeIds: string[] }> {
+}): Promise<DraftPayload> {
   const limitNote =
     params.question.charLimit > 0
       ? `글자 수 제한: ${params.question.charLimit}자 (${params.question.countSpaces ? "공백 포함" : "공백 제외"}). 초안은 제한의 85~100% 분량으로 작성.`
@@ -158,72 +199,61 @@ async function draftOne(params: {
     ? "\n국내 기업 표준 자소서 항목(성장과정·성격 장단점·지원동기·직무역량/경험·입사 후 포부) 관행과 평가 목적에 맞게 쓰세요."
     : "";
 
-  const result = await llmJson<{
-    body: string;
-    usedEpisodeIds: string[];
-  }>({
+  const allowedEpisodeIds = [
+    params.planItem.primaryEpisodeId,
+    params.planItem.secondaryEpisodeId,
+  ].filter((id): id is string => Boolean(id));
+
+  const result = await llmJson<DraftPayload>({
     route: "quality",
     system: `${DRAFT_SYSTEM}${freeFormHint}`,
-    responseSchema: {
-      type: SchemaType.OBJECT,
-      properties: {
-        body: { type: SchemaType.STRING },
-        usedEpisodeIds: {
-          type: SchemaType.ARRAY,
-          items: { type: SchemaType.STRING },
-        },
-      },
-      required: ["body", "usedEpisodeIds"],
-    } as ResponseSchema,
+    responseSchema: DRAFT_OUTPUT_SCHEMA,
     user: JSON.stringify({
       mode: params.freeForm ? "freeFormStandardKR" : "customQuestions",
-      candidate: {
-        name: params.profile.name,
-        tagline: params.profile.tagline,
-        bio: params.profile.bio,
-        about: params.profile.about,
-        values: params.profile.values,
-        skills: params.profile.skills,
-        education: params.profile.education,
-        certifications: params.profile.certifications.slice(0, 8),
-        works: params.profile.works.slice(0, 6).map((w) => ({
-          title: w.title,
-          category: w.category,
-          description: w.description,
-          role: w.role,
-          metrics: w.metrics,
-          tags: w.tags,
-        })),
-      },
+      candidateName: params.profile.name,
       job: {
         company: params.job.company,
         role: params.job.role,
-        requirements: params.job.requirements,
-        preferred: params.job.preferred,
-        responsibilities: params.job.responsibilities,
-        keywords: params.job.keywords,
-        cultureSignals: params.job.cultureSignals,
+        keywords: params.job.keywords.slice(0, 12),
+        requirements: params.job.requirements.slice(0, 8),
+        preferred: params.job.preferred.slice(0, 6),
       },
-      personas: params.personas.map((p) => ({
-        name: p.name,
-        title: p.title,
-        focus: p.focus,
-        likes: p.likes,
-        redFlags: p.redFlags,
-        weight: p.weight,
-      })),
-      selectedEpisodes: params.episodesSummary,
-      pastEssaySamples: params.essaySamples || "(과거 자소서 샘플 없음 — 톤은 담백·구체적으로)",
       question: {
         title: params.question.title,
         prompt: params.question.prompt,
       },
+      intent: params.planItem.intent,
+      plan: {
+        thesis: params.planItem.thesis,
+        notes: params.planItem.notes,
+        targetJdSignals: params.planItem.targetJdSignals,
+        primaryEpisodeId: params.planItem.primaryEpisodeId ?? null,
+        secondaryEpisodeId: params.planItem.secondaryEpisodeId ?? null,
+      },
+      selectedEpisodes:
+        params.episodes.map(formatEpisode).join("\n") || "(지정 경험 없음)",
+      allowedFacts: lockedFacts(params.facts).map((f) => ({
+        id: f.id,
+        label: f.label,
+        value: f.value,
+      })),
+      styleReferences: (() => {
+        const formatted = formatStyleReferencesForDraft(params.styleReferences);
+        return formatted.length > 0
+          ? formatted
+          : "(문체 참고 없음 — 담백·구체적으로)";
+      })(),
       constraints: constraintLines(params.constraints),
       limitNote,
       writingBrief: [
-        "문항이 묻는 것에만 집중해 답한다.",
-        "경험 1~2개를 깊게 쓰고, 나열식으로 여러 개를 얇게 쓰지 않는다.",
-        "마지막에 지원 회사·포지션과의 연결을 한 문장으로 분명히 한다.",
+        "문항이 묻는 것에만 답한다.",
+        params.planItem.thesis,
+        allowedEpisodeIds.length
+          ? "지정된 경험만 깊게 쓴다. Fact로 제3 경험을 끌어오지 않는다."
+          : "경험 소재가 없으면 방향·직무 연결로 답하고 없는 경험을 만들지 않는다.",
+        "allowedFacts locked 수치만 사용한다.",
+        "JobPosting은 회사 요구사항이다. 지원자 보유 사실로 바꾸지 않는다.",
+        "styleReferences는 문체·문단 구조·정보 밀도·두괄식·전환만 참고한다. 그 안의 회사·직무·경험·수치·자격·사실은 쓰지 않는다.",
       ],
     }),
     maxTokens: 4500,
@@ -232,65 +262,91 @@ async function draftOne(params: {
   return {
     body: (result.body ?? "").trim(),
     usedEpisodeIds: result.usedEpisodeIds ?? [],
+    usedFactIds: result.usedFactIds ?? [],
   };
 }
 
-async function compressToLimit(
-  body: string,
-  question: EssayQuestion,
-): Promise<string> {
-  if (
-    question.charLimit <= 0 ||
-    isWithinLimit(body, question.charLimit, question.countSpaces)
-  ) {
-    return body;
-  }
+async function reviseDraft(params: {
+  body: string;
+  question: EssayQuestion;
+  job: JobPosting;
+  planItem: EssayPlanItem;
+  episodes: ExperienceEpisode[];
+  facts: FactItem[];
+  styleReferences: EssayArchiveItem[];
+  issues: EssayValidationIssue[];
+}): Promise<DraftPayload> {
+  const limit =
+    params.question.charLimit > 0
+      ? `${params.question.charLimit}자 (${params.question.countSpaces ? "공백 포함" : "공백 제외"})`
+      : "제한 없음";
+  const current = countChars(params.body, params.question.countSpaces);
 
-  const compressed = await llmText({
+  const result = await llmJson<DraftPayload>({
     route: "quality",
-    system: `한국어 자소서 문장을 의미·수치·본인 기여를 유지하며 압축합니다.
+    system: `한국어 자소서 부분 수정기입니다.
 ${KOREAN_ONLY_RULE}
-본문만 출력하세요.`,
-    user: `다음 글을 ${question.charLimit}자 ${question.countSpaces ? "(공백 포함)" : "(공백 제외)"} 이내로 압축하세요. 핵심 성과와 인과는 남기세요. 한글만 사용하세요.\n\n${body}`,
-    maxTokens: 2500,
+처음부터 새로 쓰지 않는다. 좋은 문장·사실·수치는 유지하고, 아래 issue만 고친다.
+Fact source는 selected episodes + allowed locked Facts 뿐이다.
+styleReferences는 문체 참고용이며 사실 source가 아니다.
+본문 JSON만 반환한다.`,
+    responseSchema: DRAFT_OUTPUT_SCHEMA,
+    user: JSON.stringify({
+      charLimit: limit,
+      currentCharCount: current,
+      issues: params.issues.map((i) => `${i.severity}:${i.code} ${i.message}`),
+      plan: {
+        thesis: params.planItem.thesis,
+        primaryEpisodeId: params.planItem.primaryEpisodeId ?? null,
+        secondaryEpisodeId: params.planItem.secondaryEpisodeId ?? null,
+        allowedFactIds: params.planItem.allowedFactIds,
+      },
+      allowedFacts: lockedFacts(params.facts).map((f) => ({
+        id: f.id,
+        label: f.label,
+        value: f.value,
+      })),
+      selectedEpisodes: params.episodes.map(formatEpisode),
+      styleReferences: formatStyleReferencesForDraft(params.styleReferences),
+      job: { company: params.job.company, role: params.job.role },
+      draft: params.body,
+    }),
+    maxTokens: 4500,
   });
 
-  let text = compressed.trim();
-  for (
-    let i = 0;
-    i < 2 && !isWithinLimit(text, question.charLimit, question.countSpaces);
-    i++
-  ) {
-    const extra = await llmText({
-      route: "quality",
-      system: `더 짧게. 핵심만. 한글만. 본문만.\n${KOREAN_ONLY_RULE}`,
-      user: `목표 ${question.charLimit}자. 현재 ${countChars(text, question.countSpaces)}자.\n\n${text}`,
-      maxTokens: 2000,
-    });
-    text = extra.trim();
-  }
+  return {
+    body: (result.body ?? "").trim() || params.body,
+    usedEpisodeIds: result.usedEpisodeIds ?? [],
+    usedFactIds: result.usedFactIds ?? [],
+  };
+}
 
-  if (!isWithinLimit(text, question.charLimit, question.countSpaces)) {
-    const chars = [...text];
-    if (question.countSpaces) {
-      text = chars.slice(0, question.charLimit).join("");
-    } else {
-      let count = 0;
-      let out = "";
-      for (const ch of chars) {
-        if (/\s/.test(ch)) {
-          out += ch;
-        } else {
-          if (count >= question.charLimit) break;
-          out += ch;
-          count += 1;
-        }
-      }
-      text = out;
-    }
-  }
+function planItemForQuestion(
+  plan: EssayPlan | undefined,
+  questionId: string,
+): EssayPlanItem | undefined {
+  return plan?.items.find((i) => i.questionId === questionId);
+}
 
-  return text;
+function applyProvenance(
+  draft: DraftPayload,
+  allowedEpisodeIds: string[],
+  allowedFactIds: string[],
+): {
+  usedEpisodeIds: string[];
+  usedFactIds: string[];
+  issues: EssayValidationIssue[];
+} {
+  const llmEps = draft.usedEpisodeIds.length
+    ? draft.usedEpisodeIds
+    : allowedEpisodeIds;
+  const llmFacts = draft.usedFactIds;
+  return clampProvenance({
+    usedEpisodeIds: llmEps,
+    usedFactIds: llmFacts,
+    allowedEpisodeIds,
+    allowedFactIds,
+  });
 }
 
 export async function generateEssays(params: {
@@ -299,31 +355,73 @@ export async function generateEssays(params: {
   setup: SetupConfig;
   personas?: HiringPersona[];
   onlyQuestionId?: string;
+  previousPlan?: EssayPlan;
 }): Promise<GenerateResult> {
-  const personas = params.personas?.length
-    ? params.personas
-    : await buildPersonas(params.job);
+  const personas = params.personas ?? [];
 
-  const { episodes, notes } = selectEpisodes(params.profile, params.job);
-  const episodesSummary = episodes.map(formatEpisode).join("\n");
-
-  const essaySamples = params.profile.essayArchive
-    .slice(0, 4)
-    .map(
-      (a) =>
-        `Q: ${a.question}\nA: ${a.answer.slice(0, 700)}${a.rating ? ` (rating:${a.rating})` : ""}`,
-    )
-    .join("\n---\n");
-
+  const allQuestions = params.setup.questions;
   const questions = params.onlyQuestionId
-    ? params.setup.questions.filter((q) => q.id === params.onlyQuestionId)
-    : params.setup.questions;
+    ? allQuestions.filter((q) => q.id === params.onlyQuestionId)
+    : allQuestions;
 
   if (!questions.length) {
     throw new Error("생성할 문항이 없습니다.");
   }
 
-  /** 문항 병렬 생성 (한도·타임아웃 균형: 동시 2개) */
+  const factMaster = await loadFactMaster();
+  const reusePlan =
+    params.onlyQuestionId &&
+    planItemForQuestion(params.previousPlan, params.onlyQuestionId);
+
+  let plan: EssayPlan;
+  if (reusePlan && params.previousPlan) {
+    plan = params.previousPlan;
+  } else {
+    const intents = await analyzeQuestionIntents({
+      job: params.job,
+      questions,
+    });
+    const rankings: Record<string, ReturnType<typeof rankEpisodesForQuestion>> =
+      {};
+    const priorPrimaryEpisodeIds: string[] = [];
+    if (params.previousPlan && params.onlyQuestionId) {
+      for (const item of params.previousPlan.items) {
+        if (item.questionId !== params.onlyQuestionId && item.primaryEpisodeId) {
+          priorPrimaryEpisodeIds.push(item.primaryEpisodeId);
+        }
+      }
+    }
+    for (const q of questions) {
+      const intent =
+        intents.find((i) => i.questionId === q.id) ??
+        fallbackIntent(q, params.job);
+      rankings[q.id] = rankEpisodesForQuestion({
+        profile: params.profile,
+        job: params.job,
+        question: q,
+        intent,
+      });
+    }
+    const built = buildEssayPlan({
+      job: params.job,
+      questions,
+      intents,
+      rankings,
+      episodes: params.profile.experiences,
+      factMaster,
+      priorPrimaryEpisodeIds,
+    });
+    if (params.onlyQuestionId && params.previousPlan?.items.length) {
+      const map = new Map(
+        params.previousPlan.items.map((i) => [i.questionId, i]),
+      );
+      for (const item of built.items) map.set(item.questionId, item);
+      plan = { items: [...map.values()] };
+    } else {
+      plan = built;
+    }
+  }
+
   async function mapPool<T, R>(
     items: T[],
     concurrency: number,
@@ -344,53 +442,151 @@ export async function generateEssays(params: {
   }
 
   async function writeOne(question: EssayQuestion): Promise<EssayAnswer> {
+    const planItem: EssayPlanItem =
+      planItemForQuestion(plan, question.id) ??
+      buildEssayPlan({
+        job: params.job,
+        questions: [question],
+        intents: [fallbackIntent(question, params.job)],
+        rankings: { [question.id]: [] },
+        episodes: params.profile.experiences,
+        factMaster,
+      }).items[0] ?? {
+        questionId: question.id,
+        intent: fallbackIntent(question, params.job),
+        allowedFactIds: [],
+        targetJdSignals: [],
+        thesis: `${question.title}: 문항 취지에 맞게 답한다`,
+        notes: ["주 소재 없음 (적합 경험 미선택)"],
+      };
+
+    const allowedEpisodeIds = [
+      planItem.primaryEpisodeId,
+      planItem.secondaryEpisodeId,
+    ].filter((id): id is string => Boolean(id));
+    const episodes = params.profile.experiences.filter((e) =>
+      allowedEpisodeIds.includes(e.id),
+    );
+    const facts = factMaster.facts.filter(
+      (f) => f.status === "locked" && planItem.allowedFactIds.includes(f.id),
+    );
+    const styleReferences = retrieveEssaysForQuestion({
+      archive: params.profile.essayArchive,
+      job: params.job,
+      question,
+      intent: planItem.intent,
+      planItem,
+    });
+
     const draft = await draftOne({
       profile: params.profile,
       job: params.job,
       question,
-      personas,
-      episodesSummary,
-      essaySamples,
+      planItem,
+      episodes,
+      facts,
+      styleReferences,
       constraints: params.setup.constraints,
       freeForm: Boolean(params.setup.freeForm),
     });
+    const draftLlm = getLastLlmCall();
 
-    // 윤문 패스 제거(타임아웃 방지). 초안 품질 + 한글 게이트로 대체.
-    let body = await compressToLimit(draft.body, question);
+    const allowedTerms = collectAllowedTerms({
+      job: params.job,
+      episodes,
+      facts,
+      extra: [question.title, question.prompt],
+    });
 
-    let koreanNotes: string[] = [];
-    try {
-      let enforced = await enforceKoreanOnly({
+    let provenance = applyProvenance(
+      draft,
+      allowedEpisodeIds,
+      planItem.allowedFactIds,
+    );
+    let body = draft.body;
+    let validation = validateEssay({
+      body,
+      question,
+      job: params.job,
+      selectedEpisodes: episodes,
+      allEpisodes: params.profile.experiences,
+      facts,
+      allowedTerms,
+      provenanceIssues: provenance.issues,
+    });
+
+    let revised = false;
+    if (validation.issues.some((i) => i.severity === "error")) {
+      const rev = await reviseDraft({
         body,
-        company: params.job.company,
-        role: params.job.role,
-        questionTitle: question.title,
+        question,
+        job: params.job,
+        planItem,
+        episodes,
+        facts,
+        styleReferences,
+        issues: validation.issues,
       });
-      body = enforced.body;
-      if (
-        question.charLimit > 0 &&
-        !isWithinLimit(body, question.charLimit, question.countSpaces)
-      ) {
-        body = await compressToLimit(body, question);
-        enforced = await enforceKoreanOnly({
-          body,
-          company: params.job.company,
-          role: params.job.role,
-          questionTitle: question.title,
-        });
-        body = enforced.body;
-      }
-      if (enforced.remainingIssues.length) {
-        koreanNotes = [
-          `한글 외 표기 잔존: ${enforced.remainingIssues.slice(0, 8).join(", ")}`,
-        ];
-      }
-    } catch (err) {
-      console.warn("[essay] korean-only enforce failed:", err);
-      koreanNotes = ["한글 전용 교정에 실패했습니다. 문항을 다시 생성해 주세요."];
+      provenance = applyProvenance(
+        rev,
+        allowedEpisodeIds,
+        planItem.allowedFactIds,
+      );
+      body = rev.body;
+      validation = validateEssay({
+        body,
+        question,
+        job: params.job,
+        selectedEpisodes: episodes,
+        allEpisodes: params.profile.experiences,
+        facts,
+        allowedTerms,
+        provenanceIssues: provenance.issues,
+      });
+      revised = true;
+    }
+
+    if (
+      question.charLimit > 0 &&
+      !isWithinLimit(body, question.charLimit, question.countSpaces)
+    ) {
+      body = clipToCharLimit(body, question.charLimit, question.countSpaces);
+      validation = validateEssay({
+        body,
+        question,
+        job: params.job,
+        selectedEpisodes: episodes,
+        allEpisodes: params.profile.experiences,
+        facts,
+        allowedTerms,
+        provenanceIssues: provenance.issues,
+      });
     }
 
     const charCount = countChars(body, question.countSpaces);
+    const constraintNotes = [
+      ...validation.issues.map((i) => i.message),
+      ...(!planItem.primaryEpisodeId ? ["지정된 경험 소재 없음"] : []),
+    ];
+
+    console.info("[essay] diagnose", {
+      questionId: question.id,
+      questionType: planItem.intent.questionType,
+      primary: planItem.primaryEpisodeId ?? null,
+      secondary: planItem.secondaryEpisodeId ?? null,
+      allowedFactIds: planItem.allowedFactIds,
+      retrievedEssayIds: styleReferences.map((r) => r.id),
+      usedEpisodeIds: provenance.usedEpisodeIds,
+      usedFactIds: provenance.usedFactIds,
+      revised,
+      validation: {
+        valid: validation.valid,
+        codes: validation.issues.map((i) => i.code),
+      },
+      llm: draftLlm,
+      charCount,
+    });
+
     return {
       questionId: question.id,
       title: question.title,
@@ -402,31 +598,28 @@ export async function generateEssays(params: {
       withinLimit:
         question.charLimit <= 0 ||
         isWithinLimit(body, question.charLimit, question.countSpaces),
-      constraintNotes: [
-        ...checkConstraints(
-          body,
-          params.setup.constraints,
-          params.job.company,
-        ),
-        ...koreanNotes,
-      ],
-      usedEpisodeIds: draft.usedEpisodeIds,
+      constraintNotes,
+      usedEpisodeIds: provenance.usedEpisodeIds,
+      usedFactIds: provenance.usedFactIds,
+      retrievedEssayIds: styleReferences.map((r) => r.id),
+      revised,
+      validation,
     };
   }
 
   const answers = await mapPool(questions, 2, writeOne);
 
-  const personaFeedback = personas
-    .map(
-      (p) =>
-        `【${p.name} · ${p.title}】(가중 ${p.weight})\n초점: ${p.focus}\n선호: ${p.likes.join(", ")}\n레드플래그: ${p.redFlags.join(", ")}`,
-    )
-    .join("\n\n");
+  const matchingNotes = plan.items.flatMap((item) => {
+    const q = allQuestions.find((x) => x.id === item.questionId);
+    const head = q ? `${q.title}: ` : "";
+    return item.notes.map((n) => `· ${head}${n}`);
+  });
 
   return {
     personas,
     answers,
-    matchingNotes: notes,
-    personaFeedback,
+    matchingNotes,
+    personaFeedback: "",
+    plan,
   };
 }
