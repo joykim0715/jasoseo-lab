@@ -167,13 +167,19 @@ ${KOREAN_ONLY_RULE}
 6) 한글만. 허용된 도구·자격 고유명사는 유지.
 7) EssayPlan thesis·지정 경험만 깊게. 제3 경험 금지.
 8) JD의 요구·우대(운전·자격·제품 경험 등)를 지원자 보유 사실로 쓰지 않는다.
-9) styleReferences 안의 회사명·직무명·경험·수치·자격·사실은 현재 답변의 사실 source가 아니다. 문체만 참고한다.`;
+9) styleReferences 안의 회사명·직무명·경험·수치·자격·사실은 현재 답변의 사실 source가 아니다. 문체만 참고한다.
+10) 출력 JSON 키는 body(비어 있지 않은 한국어 본문), usedEpisodeIds, usedFactIds. 본문은 반드시 body 문자열에 넣는다.`;
 
 type DraftPayload = {
   body: string;
   usedEpisodeIds: string[];
   usedFactIds: string[];
 };
+
+export function essayOutputMaxTokens(charLimit: number): number {
+  if (!Number.isFinite(charLimit) || charLimit <= 0) return 2200;
+  return Math.min(3200, Math.max(1000, Math.round(charLimit * 1.8) + 400));
+}
 
 function lockedFacts(facts: FactItem[]): FactItem[] {
   return facts.filter((f) => {
@@ -264,7 +270,7 @@ async function draftOne(params: {
         "styleReferences는 문체·문단 구조·정보 밀도·두괄식·전환만 참고한다. 그 안의 회사·직무·경험·수치·자격·사실은 쓰지 않는다.",
       ],
     }),
-    maxTokens: 4500,
+    maxTokens: essayOutputMaxTokens(params.question.charLimit),
   });
 
   return {
@@ -322,7 +328,7 @@ styleReferences는 문체 참고용이며 사실 source가 아니다.
         job: { company: params.job.company, role: params.job.role },
         draft: params.body,
       }),
-      maxTokens: 4500,
+      maxTokens: essayOutputMaxTokens(params.question.charLimit),
     });
 
     return {
@@ -642,7 +648,7 @@ export async function generateEssays(params: {
     };
   }
 
-  const answers = await mapPool(questions, 2, writeOne);
+  const answers = await mapPool(questions, 1, writeOne);
 
   const matchingNotes = plan.items.flatMap((item) => {
     const q = allQuestions.find((x) => x.id === item.questionId);

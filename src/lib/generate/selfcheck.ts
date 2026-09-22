@@ -9,6 +9,7 @@ import { previousResultSchema } from "./schemas";
 import { retrieveEssaysForQuestion } from "./retrieveEssays";
 import { clampProvenance, validateEssay } from "./validateEssay";
 import { runLlmResilienceSelfCheck } from "../llmResilience";
+import { essayOutputMaxTokens } from "./essay";
 import { snapshotToEpisodes } from "../profile/loadProfile";
 import {
   canonicalGroupId,
@@ -748,6 +749,9 @@ export async function runEngine20SelfCheck() {
 
   const llmRes = await runLlmResilienceSelfCheck();
   assert(llmRes === "ok", "llm resilience");
+  assert(essayOutputMaxTokens(800) < 4500, "draft tokens must be below legacy 4500");
+  assert(essayOutputMaxTokens(800) >= 1000, "draft tokens floor");
+  assert(essayOutputMaxTokens(0) === 2200, "unlimited charLimit tokens");
 
   return "ok";
 }

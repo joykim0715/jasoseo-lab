@@ -11,6 +11,7 @@ import {
   buildRouteChain,
   classifyLlmError,
   essayBodyChars,
+  coerceEssayBody,
   isPastAbort,
   isProviderSkipped,
   LLM_CALL_TIMEOUT_MS,
@@ -442,15 +443,17 @@ function finishJson<T>(
   params: { requireBody?: boolean; stage?: string },
 ): T {
   if (params.requireBody) {
+    const usable = coerceEssayBody(parsed);
     const last = getLastLlmCall();
     timingLog("output", {
       contentChars: text.length,
-      parsedBodyChars: essayBodyChars(parsed),
+      parsedBodyChars: essayBodyChars(usable),
       provider: last?.provider,
       model: last?.model,
       stage: params.stage,
     });
-    assertUsableEssayBody(parsed);
+    assertUsableEssayBody(usable);
+    return usable;
   }
   return parsed;
 }

@@ -83,6 +83,27 @@ export function essayBodyChars(value: unknown): number {
   return typeof body === "string" ? body.trim().length : 0;
 }
 
+const ESSAY_BODY_ALIAS_KEYS = ["content", "text", "draft", "essay"] as const;
+
+/** Groq json_object 가 body 대신 다른 키에 본문을 넣는 경우만 회수. 원문은 로그하지 않는다. */
+export function coerceEssayBody<T>(parsed: T): T {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+  if (essayBodyChars(parsed) > 0) return parsed;
+  const rec = parsed as Record<string, unknown>;
+  for (const key of ESSAY_BODY_ALIAS_KEYS) {
+    const v = rec[key];
+    if (typeof v === "string" && v.trim()) {
+      return { ...rec, body: v } as T;
+    }
+  }
+  let longest = "";
+  for (const v of Object.values(rec)) {
+    if (typeof v === "string" && v.trim().length > longest.length) longest = v;
+  }
+  if (longest.trim().length >= 80) return { ...rec, body: longest } as T;
+  return parsed;
+}
+
 export function recoverReviseBody(original: string, revised: unknown): string {
   const r = typeof revised === "string" ? revised.trim() : "";
   if (r) return r;
@@ -132,6 +153,19 @@ export function canLastProviderRecover(waitMs: number): boolean {
   if (!store?.interactive) return false;
   const elapsed = Date.now() - store.startedAt;
   return elapsed + waitMs + LLM_CALL_TIMEOUT_MS < store.abortMs;
+}
+
+function skipRestOfProviderAfter(
+  step: ChainStep,
+  classified: ClassifiedLlmError,
+): boolean {
+  if (classified.kind === "auth") return true;
+  // interactive: 3.8 503 다음 3.7도 503. 같은 provider 모델 fallback은 생략하고 Groq로.
+  return (
+    classified.kind === "server" &&
+    step.provider === "gemini" &&
+    !sameModelRetryEnabled()
+  );
 }
 
 function busyError(
@@ -698,15 +732,16 @@ export async function runProviderChain<T>(params: {
         }
         const fallbackFrom =
           decision.action === "fallback" ? decision.reason : classified.kind;
+        const skipRest = skipRestOfProviderAfter(step, classified);
         // last-provider 429 recovery is exactly once; never re-enter after it is spent
         if (recoveryUsed) {
           fallbackReason = fallbackFrom;
-          skipRestOfProvider = classified.kind === "auth";
+          skipRestOfProvider = skipRest;
           params.onStepExhausted?.(step, classified);
           rememberExhaustedProvider(step, classified, params.steps);
           break;
         }
-        const isLast = !nextRunnable(i, classified.kind === "auth", step.provider);
+        const isLast = !nextRunnable(i, skipRest, step.provider);
         if (classified.kind === "rate_limit" && isLast) {
           const waitMs = lastProviderRecoveryWaitMs(err);
           if (waitMs != null && canLastProviderRecover(waitMs)) {
@@ -725,7 +760,7 @@ export async function runProviderChain<T>(params: {
           }
         }
         fallbackReason = fallbackFrom;
-        skipRestOfProvider = classified.kind === "auth";
+        skipRestOfProvider = skipRest;
         params.onStepExhausted?.(step, classified);
         rememberExhaustedProvider(step, classified, params.steps);
         break;
@@ -1088,10 +1123,11 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
     throw new Error("in-flight timeout would still hit Vercel 300s");
   }
 
-  // H. interactive: Gemini 503 → same 3.8 retry 없이 3.7
+  // H. interactive: Gemini 503 → remaining Gemini skip, Groq
   sleeps.length = 0;
   let h38 = 0;
   let h37 = 0;
+  let hGroq = 0;
   const h = await runWithLlmRequest(
     () =>
       runProviderChain({
@@ -1105,15 +1141,16 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
           }
           if (step.model === "gemini-3.7-flash") {
             h37 += 1;
-            return "g37";
+            throw new Error("H should skip 3.7 after 3.8 503");
           }
-          throw new Error("H groq");
+          hGroq += 1;
+          return "groq";
         },
       }),
     { interactive: true },
   );
-  if (h !== "g37" || h38 !== 1 || h37 !== 1 || sleeps.length !== 0) {
-    throw new Error(`H interactive 503 groq-path 38=${h38} 37=${h37} sleeps=${sleeps.join()}`);
+  if (h !== "groq" || h38 !== 1 || h37 !== 0 || hGroq !== 1 || sleeps.length !== 0) {
+    throw new Error(`H interactive 503 skip 37 38=${h38} 37=${h37} groq=${hGroq} sleeps=${sleeps.join()}`);
   }
 
   // I. interactive: retry-after 1s 429 → wait 없이 다음 모델
@@ -1431,6 +1468,13 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
   }
   if (essayBodyChars({ body: null }) !== 0) throw new Error("9c null body");
   if (essayBodyChars({}) !== 0) throw new Error("9d missing body");
+  const coerced = coerceEssayBody({
+    content: "본문이 content 키에 있음",
+    usedEpisodeIds: [],
+  }) as { body?: string };
+  if (coerced.body !== "본문이 content 키에 있음") throw new Error("9e coerce content");
+  const stillEmpty = coerceEssayBody({ title: "x", usedEpisodeIds: [] });
+  if (essayBodyChars(stillEmpty) !== 0) throw new Error("9f short alias must not coerce");
 
   // 10. USER_LLM_BUSY telemetry keeps first provider/model/status
   try {
