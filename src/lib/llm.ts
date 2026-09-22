@@ -8,8 +8,12 @@ import {
   USER_LLM_BUSY,
   buildRouteChain,
   classifyLlmError,
+  isPastAbort,
   isProviderSkipped,
+  LLM_CALL_TIMEOUT_MS,
   runProviderChain,
+  shouldSkipSlowQuality,
+  withCallTimeout,
 } from "./llmResilience";
 
 /** 무료 메인: Groq (OpenAI 호환 API) */
@@ -60,6 +64,8 @@ function getGroq() {
     groq = new OpenAI({
       apiKey: process.env.GROQ_API_KEY,
       baseURL: "https://api.groq.com/openai/v1",
+      timeout: LLM_CALL_TIMEOUT_MS,
+      maxRetries: 0,
     });
   }
   return groq;
@@ -69,7 +75,11 @@ function getOpenAI() {
   if (openaiBillingExhausted) return null;
   if (!process.env.OPENAI_API_KEY) return null;
   if (!openai) {
-    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      timeout: LLM_CALL_TIMEOUT_MS,
+      maxRetries: 0,
+    });
   }
   return openai;
 }
@@ -239,12 +249,16 @@ async function executeRoute<T>(
   meta: { inputChars: number; maxTokens?: number; stage?: string },
 ): Promise<T> {
   assertAnyProvider();
+  if (isPastAbort()) throw new Error(USER_LLM_BUSY);
   const primary = getPrimaryChat();
   const includeChat =
     Boolean(primary) &&
     !(primary?.name === "groq" && isProviderSkipped("groq")) &&
     !(primary?.name === "openai" && isProviderSkipped("openai"));
-  const includeGemini = Boolean(getGemini()) && !isProviderSkipped("gemini");
+  const includeGemini =
+    Boolean(getGemini()) &&
+    !isProviderSkipped("gemini") &&
+    !shouldSkipSlowQuality();
   const steps = buildRouteChain({
     route,
     groqModel: includeChat ? primary?.model : undefined,
@@ -288,17 +302,22 @@ async function runPrimaryText(params: {
   if (!primary) throw new Error("GROQ_API_KEY 또는 OPENAI_API_KEY 없음");
   try {
     lastLlmCall = { provider: primary.name, model: primary.model };
-    const res = await primary.client.chat.completions.create({
-      model: primary.model,
-      max_tokens: params.maxTokens ?? 4096,
-      ...(params.jsonMode
-        ? { response_format: { type: "json_object" as const } }
-        : {}),
-      messages: [
-        { role: "system", content: params.system },
-        { role: "user", content: params.user },
-      ],
-    });
+    const res = await withCallTimeout(
+      primary.client.chat.completions.create(
+        {
+          model: primary.model,
+          max_tokens: params.maxTokens ?? 4096,
+          ...(params.jsonMode
+            ? { response_format: { type: "json_object" as const } }
+            : {}),
+          messages: [
+            { role: "system", content: params.system },
+            { role: "user", content: params.user },
+          ],
+        },
+        { timeout: LLM_CALL_TIMEOUT_MS, maxRetries: 0 },
+      ),
+    );
     return res.choices[0]?.message?.content?.trim() ?? "";
   } catch (err) {
     if (primary.name === "openai") markOpenAIBillingIfNeeded(err);
@@ -334,7 +353,7 @@ async function runGeminiText(params: {
         : {}),
     },
   });
-  const result = await model.generateContent(params.user);
+  const result = await withCallTimeout(model.generateContent(params.user));
   return result.response.text() ?? "";
 }
 
@@ -385,9 +404,12 @@ async function repairJsonText(
           jsonMode: true,
         });
 
-  const tryGeminiFirst = preferGemini || !getPrimaryChat();
+  const tryGeminiFirst =
+    (preferGemini || !getPrimaryChat()) &&
+    Boolean(getGemini()) &&
+    !shouldSkipSlowQuality();
 
-  if (tryGeminiFirst && getGemini()) {
+  if (tryGeminiFirst) {
     try {
       return await run(true);
     } catch {
@@ -399,7 +421,7 @@ async function repairJsonText(
     try {
       return await run(false);
     } catch {
-      if (getGemini()) return run(true);
+      if (getGemini() && !shouldSkipSlowQuality()) return run(true);
       throw new Error("JSON 복구 실패");
     }
   }
@@ -503,15 +525,17 @@ async function runGeminiVision(params: {
       maxOutputTokens: params.maxTokens ?? 4096,
     },
   });
-  const result = await model.generateContent([
-    {
-      inlineData: {
-        mimeType: params.mediaType,
-        data: params.base64,
+  const result = await withCallTimeout(
+    model.generateContent([
+      {
+        inlineData: {
+          mimeType: params.mediaType,
+          data: params.base64,
+        },
       },
-    },
-    { text: params.user },
-  ]);
+      { text: params.user },
+    ]),
+  );
   return result.response.text() ?? "";
 }
 

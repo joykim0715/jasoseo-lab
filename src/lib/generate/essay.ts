@@ -15,6 +15,7 @@ import {
 } from "./retrieveEssays";
 import { clampProvenance, validateEssay } from "./validateEssay";
 import { loadFactMaster } from "../profile/loadFactMaster";
+import { setTimingQuestion, timingLog } from "../llmResilience";
 import type {
   CandidateProfile,
   EssayAnswer,
@@ -379,10 +380,12 @@ export async function generateEssays(params: {
   if (reusePlan && params.previousPlan) {
     plan = params.previousPlan;
   } else {
+    const intentStarted = Date.now();
     const intents = await analyzeQuestionIntents({
       job: params.job,
       questions,
     });
+    timingLog("intent", { durationMs: Date.now() - intentStarted });
     const rankings: Record<string, ReturnType<typeof rankEpisodesForQuestion>> =
       {};
     const priorPrimaryEpisodeIds: string[] = [];
@@ -444,6 +447,8 @@ export async function generateEssays(params: {
   }
 
   async function writeOne(question: EssayQuestion): Promise<EssayAnswer> {
+    const questionN = questions.indexOf(question) + 1;
+    setTimingQuestion(questionN);
     const planItem: EssayPlanItem =
       planItemForQuestion(plan, question.id) ??
       buildEssayPlan({
@@ -480,6 +485,7 @@ export async function generateEssays(params: {
       planItem,
     });
 
+    const draftStarted = Date.now();
     const draft = await draftOne({
       profile: params.profile,
       job: params.job,
@@ -490,6 +496,10 @@ export async function generateEssays(params: {
       styleReferences,
       constraints: params.setup.constraints,
       freeForm: Boolean(params.setup.freeForm),
+    });
+    timingLog(`question=${questionN}`, {
+      stage: "draft",
+      durationMs: Date.now() - draftStarted,
     });
     const draftLlm = getLastLlmCall();
 
@@ -519,6 +529,7 @@ export async function generateEssays(params: {
 
     let revised = false;
     if (validation.issues.some((i) => i.severity === "error")) {
+      const reviseStarted = Date.now();
       const rev = await reviseDraft({
         body,
         question,
@@ -528,6 +539,10 @@ export async function generateEssays(params: {
         facts,
         styleReferences,
         issues: validation.issues,
+      });
+      timingLog("revise", {
+        question: questionN,
+        durationMs: Date.now() - reviseStarted,
       });
       provenance = applyProvenance(
         rev,

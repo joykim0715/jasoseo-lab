@@ -8,7 +8,7 @@ import {
   setupSchema,
 } from "@/lib/generate/schemas";
 import { loadCandidateProfile } from "@/lib/profile/loadProfile";
-import { runWithLlmRequest, toUserLlmError } from "@/lib/llmResilience";
+import { runWithLlmRequest, timingLog, toUserLlmError } from "@/lib/llmResilience";
 import type { EssayPlan, GenerateResult, HiringPersona } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -53,16 +53,21 @@ export async function POST(req: NextRequest) {
 
     const { profile } = await loadCandidateProfile();
     const previousPlan = previous?.plan as EssayPlan | undefined;
-    const partial = await runWithLlmRequest(() =>
-      generateEssays({
-        profile,
-        job,
-        setup,
-        personas,
-        onlyQuestionId: questionId,
-        previousPlan,
-      }),
-    );
+    const partial = await runWithLlmRequest(async () => {
+      timingLog("request");
+      try {
+        return await generateEssays({
+          profile,
+          job,
+          setup,
+          personas,
+          onlyQuestionId: questionId,
+          previousPlan,
+        });
+      } finally {
+        timingLog("complete");
+      }
+    }, { interactive: true });
 
     const mergedAnswers = previous?.answers
       ? previous.answers.map((a) => {

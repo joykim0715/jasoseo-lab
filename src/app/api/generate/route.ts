@@ -3,7 +3,7 @@ import { z } from "zod";
 import { generateEssays } from "@/lib/generate/essay";
 import { normalizeFreeFormQuestions } from "@/lib/generate/freeForm";
 import { jobSchema, setupSchema } from "@/lib/generate/schemas";
-import { runWithLlmRequest, toUserLlmError } from "@/lib/llmResilience";
+import { runWithLlmRequest, timingLog, toUserLlmError } from "@/lib/llmResilience";
 import { loadCandidateProfile } from "@/lib/profile/loadProfile";
 import type { JobPosting, SetupConfig } from "@/lib/types";
 
@@ -35,9 +35,14 @@ export async function POST(req: NextRequest) {
     }
 
     const { profile } = await loadCandidateProfile();
-    const result = await runWithLlmRequest(() =>
-      generateEssays({ profile, job, setup }),
-    );
+    const result = await runWithLlmRequest(async () => {
+      timingLog("request");
+      try {
+        return await generateEssays({ profile, job, setup });
+      } finally {
+        timingLog("complete");
+      }
+    }, { interactive: true });
     return NextResponse.json({ result });
   } catch (err) {
     if (err instanceof z.ZodError) {

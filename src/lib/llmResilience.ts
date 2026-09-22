@@ -9,6 +9,13 @@ export const MAX_ATTEMPTS_PER_MODEL = 2;
 export const SERVER_RETRY_MS = 1000;
 /** 이보다 긴 retry-after / token reset 은 기다리지 않고 fallback */
 export const SHORT_RETRY_AFTER_MS = 3000;
+/** 정상 quality draft(~10–20s)는 통과, hang/늦은 503은 자른다. */
+export const LLM_CALL_TIMEOUT_MS = 25_000;
+/** Gemini 연쇄를 접고 Groq로 완주 시도 */
+export const REQUEST_SOFT_DEADLINE_MS = 240_000;
+/** 새 LLM 호출 금지. in-flight + timeout = 285s, Vercel 300s까지 15s 여유 */
+export const REQUEST_ABORT_MS = 260_000;
+export const VERCEL_MAX_DURATION_MS = 300_000;
 
 export type LlmProvider = "groq" | "openai" | "gemini";
 
@@ -37,12 +44,102 @@ export type RetryDecision =
 
 type LlmRequestState = {
   skipped: Partial<Record<LlmProvider, LlmErrorKind>>;
+  interactive: boolean;
+  startedAt: number;
+  softDeadlineMs: number;
+  abortMs: number;
+  question?: number;
+};
+
+export type LlmRequestOptions = {
+  interactive?: boolean;
+  startedAt?: number;
+  softDeadlineMs?: number;
+  abortMs?: number;
 };
 
 const llmRequest = new AsyncLocalStorage<LlmRequestState>();
 
-export function runWithLlmRequest<T>(fn: () => T): T {
-  return llmRequest.run({ skipped: {} }, fn);
+export function runWithLlmRequest<T>(fn: () => T, opts?: LlmRequestOptions): T {
+  const interactive = Boolean(opts?.interactive);
+  return llmRequest.run(
+    {
+      skipped: {},
+      interactive,
+      startedAt: opts?.startedAt ?? Date.now(),
+      softDeadlineMs: interactive
+        ? (opts?.softDeadlineMs ?? REQUEST_SOFT_DEADLINE_MS)
+        : Number.POSITIVE_INFINITY,
+      abortMs: interactive
+        ? (opts?.abortMs ?? REQUEST_ABORT_MS)
+        : Number.POSITIVE_INFINITY,
+    },
+    fn,
+  );
+}
+
+export function setTimingQuestion(n: number | undefined) {
+  const store = llmRequest.getStore();
+  if (store) store.question = n;
+}
+
+export function requestElapsedMs(): number {
+  const store = llmRequest.getStore();
+  return store ? Math.max(0, Date.now() - store.startedAt) : 0;
+}
+
+export function timingLog(
+  event: string,
+  extra: Record<string, string | number | undefined> = {},
+) {
+  const parts = [`[timing] ${event}`, `elapsedMs=${requestElapsedMs()}`];
+  for (const [k, v] of Object.entries(extra)) {
+    if (v == null || v === "") continue;
+    parts.push(`${k}=${v}`);
+  }
+  console.info(parts.join(" "));
+}
+
+export function sameModelRetryEnabled(): boolean {
+  const store = llmRequest.getStore();
+  if (!store) return true;
+  return !store.interactive;
+}
+
+export function shouldSkipSlowQuality(): boolean {
+  const store = llmRequest.getStore();
+  if (!store?.interactive) return false;
+  return Date.now() - store.startedAt >= store.softDeadlineMs;
+}
+
+export function isPastAbort(): boolean {
+  const store = llmRequest.getStore();
+  if (!store?.interactive) return false;
+  return Date.now() - store.startedAt >= store.abortMs;
+}
+
+export function llmCallTimeoutError(ms = LLM_CALL_TIMEOUT_MS): Error {
+  const err = new Error(`LLM_CALL_TIMEOUT ${ms}ms`);
+  err.name = "AbortError";
+  return err;
+}
+
+/** ponytail: race only; legacy Gemini SDK has no abort, in-flight may finish in background */
+export async function withCallTimeout<T>(
+  work: Promise<T>,
+  ms = LLM_CALL_TIMEOUT_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(llmCallTimeoutError(ms)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function isProviderSkipped(provider: LlmProvider): boolean {
@@ -243,9 +340,16 @@ export function inferRateLimitKind(
   return "unknown";
 }
 
-export function decideRetry(err: unknown, attempt: number): RetryDecision {
+export function decideRetry(
+  err: unknown,
+  attempt: number,
+  sameModelRetry = true,
+): RetryDecision {
   const classified = classifyLlmError(err);
   if (!classified.retryable) {
+    return { action: "fallback", reason: classified.kind };
+  }
+  if (!sameModelRetry) {
     return { action: "fallback", reason: classified.kind };
   }
   if (attempt >= MAX_ATTEMPTS_PER_MODEL) {
@@ -375,6 +479,9 @@ export async function runProviderChain<T>(params: {
 }): Promise<T> {
   const sleep = params.sleep ?? defaultSleep;
   const log = params.log ?? ((line: string) => console.info(line));
+  const sameModelRetry = sameModelRetryEnabled();
+  const maxAttempts = sameModelRetry ? MAX_ATTEMPTS_PER_MODEL : 1;
+  const question = llmRequest.getStore()?.question;
   const steps = filterAvailableSteps(params.steps);
   if (params.inputChars != null || params.maxTokens != null || params.stage) {
     log(
@@ -389,17 +496,42 @@ export async function runProviderChain<T>(params: {
   let last: unknown;
 
   for (let i = 0; i < steps.length; i++) {
+    if (isPastAbort()) {
+      timingLog("fallback", { reason: "deadline_abort" });
+      throw new Error(USER_LLM_BUSY);
+    }
     const step = steps[i];
+    if (step.provider === "gemini" && shouldSkipSlowQuality()) {
+      timingLog("fallback", { reason: "deadline_skip_gemini", provider: "groq" });
+      log("[llm] fallback reason=deadline_skip_gemini provider=groq");
+      continue;
+    }
+
     let skipRestOfProvider = false;
     let fallbackReason = "exhausted";
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (isPastAbort()) {
+        timingLog("fallback", { reason: "deadline_abort" });
+        throw new Error(USER_LLM_BUSY);
+      }
+      const started = Date.now();
       try {
         const result = await params.run(step);
+        const durationMs = Date.now() - started;
         log(`[llm] success provider=${step.provider} model=${step.model}`);
+        timingLog(question != null ? `question=${question}` : "call", {
+          provider: step.provider,
+          model: step.model,
+          attempt,
+          durationMs,
+          status: "ok",
+          stage: params.stage,
+        });
         return result;
       } catch (err) {
         last = err;
+        const durationMs = Date.now() - started;
         const classified = classifyLlmError(err);
         const headers = extractErrorHeaders(err);
         log(
@@ -411,7 +543,15 @@ export async function runProviderChain<T>(params: {
             headers,
           }),
         );
-        const decision = decideRetry(err, attempt);
+        timingLog(question != null ? `question=${question}` : "call", {
+          provider: step.provider,
+          model: step.model,
+          attempt,
+          durationMs,
+          status: classified.status ?? classified.kind,
+          stage: params.stage,
+        });
+        const decision = decideRetry(err, attempt, sameModelRetry);
         if (decision.action === "retry") {
           log(
             `[llm] retry provider=${step.provider} delayMs=${decision.delayMs}`,
@@ -427,11 +567,20 @@ export async function runProviderChain<T>(params: {
       }
     }
 
-    const next = steps.slice(i + 1).find((s) =>
-      skipRestOfProvider ? s.provider !== step.provider : true,
-    );
+    const next = steps.slice(i + 1).find((s) => {
+      if (skipRestOfProvider && s.provider === step.provider) return false;
+      if (s.provider === "gemini" && shouldSkipSlowQuality()) return false;
+      return true;
+    });
     if (next) {
-      log(`[llm] fallback reason=${fallbackReason} provider=${next.provider} model=${next.model}`);
+      log(
+        `[llm] fallback reason=${fallbackReason} provider=${next.provider} model=${next.model}`,
+      );
+      timingLog("fallback", {
+        reason: fallbackReason,
+        provider: next.provider,
+        model: next.model,
+      });
     }
 
     if (skipRestOfProvider) {
@@ -755,6 +904,174 @@ export async function runLlmResilienceSelfCheck(): Promise<string> {
     "x-ratelimit-remaining-requests": "5",
   });
   if (tpmKind !== "tpm") throw new Error(`infer tpm got ${tpmKind}`);
+
+  const dInteractive429 = decideRetry(
+    httpErr(429, "rate", { "retry-after": "1" }),
+    1,
+    false,
+  );
+  if (dInteractive429.action !== "fallback") {
+    throw new Error("interactive 429 must not same-model retry");
+  }
+  const dInteractive503 = decideRetry(httpErr(503), 1, false);
+  if (dInteractive503.action !== "fallback") {
+    throw new Error("interactive 503 must not same-model retry");
+  }
+
+  if (REQUEST_ABORT_MS !== 260_000) {
+    throw new Error("interactive abort deadline must be 260s");
+  }
+  if (REQUEST_ABORT_MS + LLM_CALL_TIMEOUT_MS !== 285_000) {
+    throw new Error("abort + per-call timeout must be 285s");
+  }
+  if (REQUEST_ABORT_MS + LLM_CALL_TIMEOUT_MS >= VERCEL_MAX_DURATION_MS) {
+    throw new Error("in-flight timeout would still hit Vercel 300s");
+  }
+
+  // H. interactive: Gemini 503 → same 3.8 retry 없이 3.7
+  sleeps.length = 0;
+  let h38 = 0;
+  let h37 = 0;
+  const h = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: chainQuality,
+        sleep,
+        log,
+        run: async (step) => {
+          if (step.model === "gemini-3.8-flash") {
+            h38 += 1;
+            throw httpErr(503, "generateContent");
+          }
+          if (step.model === "gemini-3.7-flash") {
+            h37 += 1;
+            return "g37";
+          }
+          throw new Error("H groq");
+        },
+      }),
+    { interactive: true },
+  );
+  if (h !== "g37" || h38 !== 1 || h37 !== 1 || sleeps.length !== 0) {
+    throw new Error(`H interactive 503 groq-path 38=${h38} 37=${h37} sleeps=${sleeps.join()}`);
+  }
+
+  // I. interactive: retry-after 1s 429 → wait 없이 다음 모델
+  sleeps.length = 0;
+  let i38 = 0;
+  let i37 = 0;
+  const iRes = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: chainQuality,
+        sleep,
+        log,
+        run: async (step) => {
+          if (step.model === "gemini-3.8-flash") {
+            i38 += 1;
+            throw httpErr(429, "rate", { "retry-after": "1" });
+          }
+          if (step.model === "gemini-3.7-flash") {
+            i37 += 1;
+            return "g37";
+          }
+          throw new Error("I groq");
+        },
+      }),
+    { interactive: true },
+  );
+  if (iRes !== "g37" || i38 !== 1 || i37 !== 1 || sleeps.length !== 0) {
+    throw new Error(`I interactive 429 38=${i38} 37=${i37} sleeps=${sleeps.join()}`);
+  }
+
+  // J. timeout → 다음 모델, same-model retry 없음
+  let j38 = 0;
+  let j37 = 0;
+  const j = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: chainQuality,
+        sleep,
+        log,
+        run: async (step) => {
+          if (step.model === "gemini-3.8-flash") {
+            j38 += 1;
+            throw llmCallTimeoutError(25_000);
+          }
+          if (step.model === "gemini-3.7-flash") {
+            j37 += 1;
+            return "g37";
+          }
+          throw new Error("J groq");
+        },
+      }),
+    { interactive: true },
+  );
+  if (j !== "g37" || j38 !== 1 || j37 !== 1) {
+    throw new Error(`J timeout fallback 38=${j38} 37=${j37}`);
+  }
+
+  // K. soft deadline → Gemini skip, Groq 우선
+  let kGemini = 0;
+  let kGroq = 0;
+  const k = await runWithLlmRequest(
+    () =>
+      runProviderChain({
+        steps: chainQuality,
+        sleep,
+        log,
+        run: async (step) => {
+          if (step.provider === "gemini") {
+            kGemini += 1;
+            throw new Error("K gemini should be skipped");
+          }
+          kGroq += 1;
+          return "groq";
+        },
+      }),
+    { interactive: true, startedAt: Date.now() - REQUEST_SOFT_DEADLINE_MS - 1 },
+  );
+  if (k !== "groq" || kGemini !== 0 || kGroq !== 1) {
+    throw new Error(`K deadline skip gemini=${kGemini} groq=${kGroq}`);
+  }
+
+  // L. abort deadline → JSON busy, provider 호출 없음
+  let lCalls = 0;
+  try {
+    await runWithLlmRequest(
+      () =>
+        runProviderChain({
+          steps: chainQuality,
+          sleep,
+          log,
+          run: async () => {
+            lCalls += 1;
+            return "nope";
+          },
+        }),
+      { interactive: true, startedAt: Date.now() - REQUEST_ABORT_MS - 1 },
+    );
+    throw new Error("L should throw");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg !== USER_LLM_BUSY) throw new Error(`L unsanitized: ${msg}`);
+    if (lCalls !== 0) throw new Error(`L still called providers ${lCalls}`);
+  }
+
+  const t0 = Date.now();
+  try {
+    await withCallTimeout(new Promise((r) => setTimeout(r, 5_000)), 40);
+    throw new Error("withCallTimeout should reject");
+  } catch (err) {
+    if (!(err instanceof Error) || err.name !== "AbortError") {
+      throw new Error("withCallTimeout kind");
+    }
+    if (Date.now() - t0 > 400) throw new Error("withCallTimeout too slow");
+  }
+  const clsTimeout = classifyLlmError(llmCallTimeoutError());
+  if (!clsTimeout.retryable || clsTimeout.kind !== "timeout") {
+    throw new Error("classify timeout");
+  }
 
   void logs;
   return "ok";
