@@ -110,6 +110,42 @@ export function retrieveEssaysForQuestion(params: {
   return scored.slice(0, MAX_STYLE_REFS).map((row) => row.item);
 }
 
+function redactReferenceText(text: string, item: EssayArchiveItem): string {
+  let cleaned = text.replace(/\s+/g, " ").trim();
+  for (const token of [item.company, item.role, item.name]) {
+    const name = token?.trim();
+    if (name && name.length >= 2) cleaned = cleaned.split(name).join("[대상]");
+  }
+  return cleaned.replace(
+    /\d+(?:[.,]\d+)?(?:\s*(?:%p|%|만|명|건|개|원))?/g,
+    "[수치]",
+  );
+}
+
+export function formatDraftReferenceCues(
+  items: EssayArchiveItem[],
+): {
+  id: string;
+  question: string;
+  opening: string;
+  rhythmExcerpt: string;
+}[] {
+  return items.slice(0, 2).map((item) => {
+    const cleaned = redactReferenceText(item.answer, item);
+    const sentences = cleaned
+      .split(/(?<=[.?!。])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+    const clip = (value: string) => value.slice(0, 150);
+    return {
+      id: item.id,
+      question: item.question,
+      opening: clip(sentences[0] ?? cleaned),
+      rhythmExcerpt: clip(sentences[1] ?? sentences[0] ?? cleaned),
+    };
+  });
+}
+
 export function formatStyleReferencesForDraft(
   items: EssayArchiveItem[],
 ): { id: string; question: string; tone?: string; referenceType?: string; answerExcerpt: string }[] {

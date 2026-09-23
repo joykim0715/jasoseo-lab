@@ -248,6 +248,16 @@ function parseLlmJson<T>(text: string): T {
 
 export type LlmRoute = "fast" | "quality";
 
+/** gpt-oss 초안만 low. intent·revise·다른 모델에는 필드를 보내지 않는다. */
+export function gptOssDraftReasoningEffort(
+  model: string,
+  stage?: string,
+): "low" | undefined {
+  if (stage !== "draft") return undefined;
+  if (!/gpt-oss/i.test(model)) return undefined;
+  return "low";
+}
+
 async function executeRoute<T>(
   route: LlmRoute,
   runChat: () => Promise<T>,
@@ -306,9 +316,11 @@ async function runPrimaryText(params: {
   user: string;
   maxTokens?: number;
   jsonMode?: boolean;
+  stage?: string;
 }): Promise<string> {
   const primary = getPrimaryChat();
   if (!primary) throw new Error("GROQ_API_KEY 또는 OPENAI_API_KEY 없음");
+  const reasoningEffort = gptOssDraftReasoningEffort(primary.model, params.stage);
   try {
     lastLlmCall = { provider: primary.name, model: primary.model };
     const res = await withCallTimeout(
@@ -316,6 +328,7 @@ async function runPrimaryText(params: {
         {
           model: primary.model,
           max_tokens: params.maxTokens ?? 4096,
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
           ...(params.jsonMode
             ? { response_format: { type: "json_object" as const } }
             : {}),
@@ -483,6 +496,7 @@ async function completeJson<T>(params: {
         user: params.user,
         maxTokens: params.maxTokens,
         jsonMode: true,
+        stage: params.stage,
       });
 
   try {

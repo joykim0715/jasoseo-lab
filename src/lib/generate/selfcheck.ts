@@ -6,10 +6,18 @@ import { normalizeFreeFormQuestions } from "./freeForm";
 import { fallbackIntent, inferQuestionType } from "./questionIntent";
 import { buildEssayPlan } from "./plan";
 import { previousResultSchema } from "./schemas";
-import { retrieveEssaysForQuestion } from "./retrieveEssays";
+import {
+  formatDraftReferenceCues,
+  retrieveEssaysForQuestion,
+} from "./retrieveEssays";
 import { clampProvenance, validateEssay } from "./validateEssay";
 import { runLlmResilienceSelfCheck } from "../llmResilience";
-import { essayOutputMaxTokens } from "./essay";
+import {
+  draftStyleCard,
+  essayOutputMaxTokens,
+  siblingMaterialNotes,
+} from "./essay";
+import { gptOssDraftReasoningEffort } from "../llm";
 import { snapshotToEpisodes } from "../profile/loadProfile";
 import {
   canonicalGroupId,
@@ -768,6 +776,66 @@ export async function runEngine20SelfCheck() {
   assert(essayOutputMaxTokens(800) < 4500, "draft tokens must be below legacy 4500");
   assert(essayOutputMaxTokens(800) >= 1000, "draft tokens floor");
   assert(essayOutputMaxTokens(0) === 2200, "unlimited charLimit tokens");
+  assert(
+    gptOssDraftReasoningEffort("openai/gpt-oss-120b", "draft") === "low",
+    "gpt-oss draft reasoning low",
+  );
+  assert(
+    gptOssDraftReasoningEffort("openai/gpt-oss-120b", "revise") === undefined,
+    "revise does not lower reasoning",
+  );
+  assert(
+    gptOssDraftReasoningEffort("llama-3.3-70b-versatile", "draft") === undefined,
+    "non gpt-oss draft has no reasoning_effort",
+  );
+  const motive = draftStyleCard("motivation");
+  assert(motive.includes("지원동기"), "motivation card");
+  assert(motive.includes("관심"), "motivation opens from interest");
+  assert(!motive.includes("첫 문장은 결론"), "deprecated opening template removed");
+  assert(!motive.includes("삼성 기준"), "samsung surface is not a draft rule");
+  assert(motive.includes("어미를 억지로 바꾸지 않는다"), "ending variety is not a goal");
+  assert(!motive.includes("문제해결"), "motivation card stays one type");
+  const skill = draftStyleCard("competency");
+  assert(skill.includes("판단"), "competency includes judgment");
+  assert(skill.includes("직접 경험처럼 쓰지 않는다"), "competency does not inflate experience");
+  const aspiration = draftStyleCard("aspiration");
+  assert(aspiration.includes("산출물"), "aspiration requires an output");
+  const siblings = siblingMaterialNotes(
+    [
+      { questionId: "a", questionType: "motivation", thesis: "동기 초점" },
+      { questionId: "b", questionType: "competency", thesis: "역량 초점" },
+    ],
+    "a",
+  );
+  assert(siblings.length === 1 && siblings[0].includes("역량 초점"), "sibling focus excludes self");
+  const collab = draftStyleCard("collaboration");
+  assert(collab.includes("참고 구조"), "collaboration card is reference only");
+  const cues = formatDraftReferenceCues([
+    {
+      id: "ref-1",
+      name: "아카이브",
+      company: "삼성생명",
+      question: "지원동기",
+      answer:
+        "삼성생명에서 리텐션 83%를 만들었습니다. 이후 안내 순서를 바꿨습니다.",
+    },
+    {
+      id: "ref-2",
+      name: "둘째",
+      question: "역량",
+      answer: "기준을 세웠습니다. 현장 확인 뒤 가이드를 고쳤습니다.",
+    },
+    {
+      id: "ref-3",
+      name: "셋째",
+      question: "포부",
+      answer: "세 번째는 넣지 않습니다. 이 문장은 잘려야 합니다.",
+    },
+  ]);
+  assert(cues.length === 2, "draft references cap at 2");
+  assert(!cues[0].opening.includes("83"), "reference numbers are redacted");
+  assert(!cues[0].opening.includes("삼성생명"), "reference company is redacted");
+  assert(cues[0].rhythmExcerpt.length <= 150, "rhythm excerpt stays short");
 
   return "ok";
 }
