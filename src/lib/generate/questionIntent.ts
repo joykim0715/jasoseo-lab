@@ -55,6 +55,7 @@ function classifyIntentText(t: string): string | null {
     return "aspiration";
   }
   if (/장단점|성격|장점|단점|강점|약점/.test(t)) return "personality";
+  if (/힘들었던\s*경험|어려웠던\s*경험/.test(t)) return "challenge";
   if (/성장과정|가치관|형성\s*계기/.test(t)) return "growth";
   if (
     /직무역량|직무\s*역량|직무.{0,8}경험|프로젝트|성과|문제\s*해결/.test(t)
@@ -83,6 +84,11 @@ export function fallbackIntent(
       goals: ["장점 1개와 직무 연결", "단점 인식·개선"],
       evidencePriorities: ["구체 협업 사례", "개선 습관"],
       avoid: ["추상 성격 형용사만"],
+    },
+    challenge: {
+      goals: ["막힌 지점", "접근을 바꾼 판단", "그 뒤의 일하는 방식"],
+      evidencePriorities: ["한계와 변경", "실행과 결과"],
+      avoid: ["실패를 성공담으로 바꾸기", "없는 수치"],
     },
     collaboration: {
       goals: ["협업·조율 과정", "본인 역할과 갈등 해결"],
@@ -127,9 +133,14 @@ function normalizeIntent(
   job: JobPosting,
 ): QuestionIntent {
   const fallback = fallbackIntent(question, job);
+  const llmType = (raw.questionType || "").trim();
+  const questionType =
+    fallback.questionType === "challenge"
+      ? "challenge"
+      : llmType || fallback.questionType;
   return {
     questionId: question.id,
-    questionType: (raw.questionType || fallback.questionType).trim(),
+    questionType,
     goals: Array.isArray(raw.goals) && raw.goals.length ? raw.goals : fallback.goals,
     evidencePriorities:
       Array.isArray(raw.evidencePriorities) && raw.evidencePriorities.length
@@ -157,7 +168,8 @@ export async function analyzeQuestionIntents(params: {
       stage: "intent",
       system: `You analyze Korean job-application essay questions in one pass.
 For each question return questionId (copy exactly), questionType
-(collaboration|growth|personality|motivation|competency|aspiration|general),
+(collaboration|growth|personality|motivation|competency|aspiration|challenge|general).
+힘들었던 경험은 challenge로 둔다.
 goals, evidencePriorities, jdSignals, avoid.
 Keep strings short. Korean text fields. No markdown.`,
       user: JSON.stringify({

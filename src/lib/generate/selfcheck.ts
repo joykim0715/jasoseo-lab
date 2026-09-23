@@ -141,6 +141,14 @@ export async function runEngine20SelfCheck() {
 
   assert(inferQuestionType("협업 경험", "팀과 일한 경험") === "collaboration", "collab title");
   assert(inferQuestionType("입사 후 포부", "1년차 적응·기여 → 3~5년 전문성 성장") === "aspiration", "aspiration over 성장");
+  assert(
+    qA.map((item) => item.title).join("|") ===
+      "지원동기|힘들었던 경험|장단점|직무 역량|입사 후 포부",
+    "freeform order",
+  );
+  assert(inferQuestionType("힘들었던 경험", "막힌 지점") === "challenge", "challenge");
+  assert(inferQuestionType("장단점", "장점과 단점") === "personality", "장단점");
+  assert(inferQuestionType("직무 역량", "직무 경험") === "competency", "직무 역량");
   assert(inferQuestionType("성장과정", "가치관이 형성된 계기") === "growth", "growth");
   assert(inferQuestionType("성격의 장단점", "장점과 단점") === "personality", "personality");
   assert(inferQuestionType("직무 관련 경험", "STAR로 서술") === "competency", "competency");

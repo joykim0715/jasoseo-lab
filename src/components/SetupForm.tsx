@@ -3,7 +3,10 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { JobSummary } from "./JobSummary";
-import { normalizeFreeFormQuestions } from "@/lib/generate/freeForm";
+import {
+  FREE_FORM_ITEMS,
+  normalizeFreeFormQuestions,
+} from "@/lib/generate/freeForm";
 import { loadJob, loadSetup, saveSetup } from "@/lib/session";
 import type {
   EssayQuestion,
@@ -204,19 +207,18 @@ export function SetupForm() {
               자유 양식으로 생성
             </span>
             <span className="mt-1 block text-sm text-[var(--muted)]">
-              국내 기업에서 흔한 표준 자소서 항목(성장과정 · 성격 장단점 ·
-              지원동기 · 직무역량/경험 · 입사 후 포부)으로 자동 구성합니다.
-              체크 시 아래 수동 문항 구성은 비활성화됩니다.
+              지원동기 · 힘들었던 경험 · 장단점 · 직무 역량 · 입사 후 포부로
+              자동 구성합니다. 체크 시 아래 수동 문항 구성은 비활성화됩니다.
             </span>
           </span>
         </label>
         {freeForm && (
           <ul className="ml-7 list-disc space-y-1 text-sm text-[var(--muted)]">
-            <li>성장과정 (800자)</li>
-            <li>성격의 장단점 (700자)</li>
-            <li>지원동기 (800자)</li>
-            <li>직무역량 및 경험 (1000자)</li>
-            <li>입사 후 포부 (700자)</li>
+            {FREE_FORM_ITEMS.map((item, i) => (
+              <li key={item.title}>
+                {i + 1}. {item.title} ({item.charLimit}자)
+              </li>
+            ))}
           </ul>
         )}
       </section>

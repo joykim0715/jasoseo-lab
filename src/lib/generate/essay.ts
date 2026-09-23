@@ -337,7 +337,7 @@ async function draftOne(params: {
       : "글자 수 제한 없음";
 
   const freeFormHint = params.freeForm
-    ? "\n국내 기업 표준 자소서 항목(성장과정·성격 장단점·지원동기·직무역량/경험·입사 후 포부) 관행과 평가 목적에 맞게 쓰세요."
+    ? "\n자유 양식 항목(지원동기·힘들었던 경험·장단점·직무 역량·입사 후 포부)이 묻는 바에 맞게 쓰세요."
     : "";
 
   const allowedEpisodeIds = [
